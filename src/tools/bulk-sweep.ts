@@ -11,7 +11,7 @@ export const bulkPreviewParams = {
 export function registerBulkPreview(server: McpServer): void {
   server.tool(
     'bulk_preview',
-    'Preview a bulk query before acting on it: returns an approximate total count (Gmail\'s resultSizeEstimate), a small sample of matching messages, and a sample-based top-senders breakdown. Always call this before bulk_execute — never guess at scale.',
+    'Preview a bulk query before acting on it: returns a real total count (via cheap ID-only pagination, capped at 20,000 — check count_is_capped), a small sample of matching messages, and a sample-based top-senders breakdown. Always call this before bulk_execute — never guess at scale.',
     bulkPreviewParams,
     async ({ query, account, sample_size }) => {
       try {

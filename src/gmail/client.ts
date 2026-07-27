@@ -580,11 +580,16 @@ async function listMessageIdsByQuery(opts: {
   let firstPage = true;
 
   while (ids.length < maxIds) {
+    // Always request a full page (Gmail's max) even if the caller only wants
+    // a handful of IDs back — resultSizeEstimate is unreliable when the page
+    // size itself is small (it tends to just reflect the requested page size
+    // rather than the query's true match count). We still only keep/return
+    // up to maxIds below.
     const response = await withRetry(() =>
       gmail.users.messages.list({
         userId: 'me',
         q: opts.query,
-        maxResults: Math.min(maxIds - ids.length, 500),
+        maxResults: 500,
         pageToken,
       })
     );
@@ -596,20 +601,28 @@ async function listMessageIdsByQuery(opts: {
 
     const messages = response.data.messages || [];
     for (const msg of messages) {
-      if (msg.id) ids.push(msg.id);
+      if (msg.id && ids.length < maxIds) ids.push(msg.id);
     }
 
     pageToken = response.data.nextPageToken ?? undefined;
-    if (!pageToken || messages.length === 0) break;
+    if (!pageToken || messages.length === 0 || ids.length >= maxIds) break;
   }
 
   return { ids, estimatedTotal };
 }
 
+const PREVIEW_COUNT_CAP = 20_000;
+
 /**
- * Cheap preview of a bulk query: Gmail's approximate result count plus a
- * small sample of real messages (with metadata) so the user can sanity-check
- * what would be touched before anything is modified.
+ * Cheap preview of a bulk query: a real count (via full ID-only pagination,
+ * not Gmail's resultSizeEstimate — that field turned out to just reflect the
+ * requested page size rather than the true match count, verified empirically:
+ * five completely different queries all "estimated" exactly 501 when paged at
+ * 500) plus a small sample of real messages (with metadata) so the user can
+ * sanity-check what would be touched before anything is modified. Counting
+ * is still cheap — it's ID-only pagination, ~1 request per 500 matches, no
+ * per-message metadata fetch — capped at PREVIEW_COUNT_CAP so an enormous
+ * bucket doesn't turn a "preview" into a multi-minute call.
  */
 export async function previewBulkQuery(opts: {
   query: string;
@@ -619,16 +632,17 @@ export async function previewBulkQuery(opts: {
   const sampleSize = Math.min(opts.sampleSize ?? 15, 50);
   const gmail = await getGmailClient(opts.account);
 
-  const { ids, estimatedTotal } = await listMessageIdsByQuery({
+  const { ids } = await listMessageIdsByQuery({
     query: opts.query,
     account: opts.account,
-    maxIds: sampleSize,
+    maxIds: PREVIEW_COUNT_CAP,
   });
 
+  const sampleIds = ids.slice(0, sampleSize);
   const sample: EmailSummary[] = [];
   const senderCounts = new Map<string, number>();
 
-  for (const id of ids) {
+  for (const id of sampleIds) {
     const full = await withRetry(() =>
       gmail.users.messages.get({
         userId: 'me',
@@ -648,7 +662,8 @@ export async function previewBulkQuery(opts: {
 
   return {
     query: opts.query,
-    estimated_count: estimatedTotal,
+    estimated_count: ids.length,
+    count_is_capped: ids.length >= PREVIEW_COUNT_CAP,
     sample,
     top_senders,
   };

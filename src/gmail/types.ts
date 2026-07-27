@@ -116,10 +116,16 @@ export interface BatchResult {
   message_ids: string[];
 }
 
-/** Lightweight preview of a bulk query: count estimate + a small sample. */
+/**
+ * Lightweight preview of a bulk query: a real count (via ID-only pagination,
+ * capped) + a small sample. Despite the field name, estimated_count is an
+ * exact count up to the cap — Gmail's own resultSizeEstimate was found to be
+ * unreliable (it echoed the requested page size, not the true match count).
+ */
 export interface BulkPreviewResult {
   query: string;
   estimated_count: number;
+  count_is_capped: boolean;
   sample: EmailSummary[];
   top_senders: Array<{ from: string; count: number }>;
 }
