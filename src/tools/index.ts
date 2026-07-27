@@ -13,6 +13,9 @@ import { registerArchiveEmail } from './archive.js';
 import { registerLabelEmail } from './label.js';
 import { registerTrashEmail } from './trash.js';
 import { registerBatchModify } from './batch.js';
+import { registerBulkPreview, registerBulkExecute } from './bulk-sweep.js';
+import { registerCreateLabel } from './create-label.js';
+import { registerCreateFilter, registerListFilters } from './filters.js';
 
 /**
  * Register all Gmail MCP tools with the server.
@@ -24,6 +27,7 @@ export function registerAllTools(server: McpServer): void {
   registerReadEmail(server);
   registerGetThread(server);
   registerGetLabels(server);
+  registerListFilters(server);
 
   // Write tools
   registerSendEmail(server);
@@ -37,4 +41,10 @@ export function registerAllTools(server: McpServer): void {
   registerLabelEmail(server);
   registerTrashEmail(server);
   registerBatchModify(server);
+  registerCreateLabel(server);
+  registerCreateFilter(server);
+
+  // Bulk tools (scale beyond a few hundred messages)
+  registerBulkPreview(server);
+  registerBulkExecute(server);
 }

@@ -561,6 +561,229 @@ export async function batchModify(opts: {
 }
 
 /**
+ * List message IDs matching a query, cheaply — no per-message metadata fetch.
+ * Used by bulk operations where fetching full metadata for every match would
+ * be far too slow (listMessages/searchMessages do one `.get()` per result,
+ * which doesn't scale past a few hundred messages).
+ */
+async function listMessageIdsByQuery(opts: {
+  query: string;
+  account?: string;
+  maxIds?: number;
+}): Promise<{ ids: string[]; estimatedTotal: number }> {
+  const gmail = await getGmailClient(opts.account);
+  const maxIds = opts.maxIds ?? 50_000;
+
+  const ids: string[] = [];
+  let pageToken: string | undefined;
+  let estimatedTotal = 0;
+  let firstPage = true;
+
+  while (ids.length < maxIds) {
+    const response = await withRetry(() =>
+      gmail.users.messages.list({
+        userId: 'me',
+        q: opts.query,
+        maxResults: Math.min(maxIds - ids.length, 500),
+        pageToken,
+      })
+    );
+
+    if (firstPage) {
+      estimatedTotal = response.data.resultSizeEstimate ?? 0;
+      firstPage = false;
+    }
+
+    const messages = response.data.messages || [];
+    for (const msg of messages) {
+      if (msg.id) ids.push(msg.id);
+    }
+
+    pageToken = response.data.nextPageToken ?? undefined;
+    if (!pageToken || messages.length === 0) break;
+  }
+
+  return { ids, estimatedTotal };
+}
+
+/**
+ * Cheap preview of a bulk query: Gmail's approximate result count plus a
+ * small sample of real messages (with metadata) so the user can sanity-check
+ * what would be touched before anything is modified.
+ */
+export async function previewBulkQuery(opts: {
+  query: string;
+  account?: string;
+  sampleSize?: number;
+}): Promise<import('./types.js').BulkPreviewResult> {
+  const sampleSize = Math.min(opts.sampleSize ?? 15, 50);
+  const gmail = await getGmailClient(opts.account);
+
+  const { ids, estimatedTotal } = await listMessageIdsByQuery({
+    query: opts.query,
+    account: opts.account,
+    maxIds: sampleSize,
+  });
+
+  const sample: EmailSummary[] = [];
+  const senderCounts = new Map<string, number>();
+
+  for (const id of ids) {
+    const full = await withRetry(() =>
+      gmail.users.messages.get({
+        userId: 'me',
+        id,
+        format: 'metadata',
+        metadataHeaders: ['From', 'To', 'Subject', 'Date'],
+      })
+    );
+    const summary = toEmailSummary(full.data);
+    sample.push(summary);
+    senderCounts.set(summary.from, (senderCounts.get(summary.from) || 0) + 1);
+  }
+
+  const top_senders = [...senderCounts.entries()]
+    .map(([from, count]) => ({ from, count }))
+    .sort((a, b) => b.count - a.count);
+
+  return {
+    query: opts.query,
+    estimated_count: estimatedTotal,
+    sample,
+    top_senders,
+  };
+}
+
+/**
+ * Execute a bulk action (archive, or add/remove labels) against every message
+ * matching a query. Paginates message IDs cheaply, then batchModifies in
+ * chunks of 1000 (Gmail API's per-call limit). Capped at maxMessages as a
+ * safety backstop against an unexpectedly broad query.
+ */
+export async function bulkModifyByQuery(opts: {
+  query: string;
+  account?: string;
+  addLabelIds?: string[];
+  removeLabelIds?: string[];
+  maxMessages?: number;
+}): Promise<{ modified_count: number; batches: number; truncated: boolean }> {
+  const maxMessages = opts.maxMessages ?? 50_000;
+  const { ids, estimatedTotal } = await listMessageIdsByQuery({
+    query: opts.query,
+    account: opts.account,
+    maxIds: maxMessages,
+  });
+
+  let modified_count = 0;
+  let batches = 0;
+  const CHUNK = 1000;
+
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    await batchModify({
+      messageIds: chunk,
+      addLabelIds: opts.addLabelIds,
+      removeLabelIds: opts.removeLabelIds,
+      account: opts.account,
+    });
+    modified_count += chunk.length;
+    batches += 1;
+  }
+
+  return { modified_count, batches, truncated: estimatedTotal > ids.length };
+}
+
+/**
+ * Create a new Gmail label.
+ */
+export async function createLabel(opts: {
+  name: string;
+  account?: string;
+}): Promise<LabelInfo> {
+  const gmail = await getGmailClient(opts.account);
+
+  const response = await withRetry(() =>
+    gmail.users.labels.create({
+      userId: 'me',
+      requestBody: {
+        name: opts.name,
+        labelListVisibility: 'labelShow',
+        messageListVisibility: 'show',
+      },
+    })
+  );
+
+  return {
+    id: response.data.id || '',
+    name: response.data.name || '',
+    type: response.data.type || 'user',
+    messagesTotal: 0,
+    messagesUnread: 0,
+  };
+}
+
+/**
+ * Create a Gmail filter (server-side rule applied to future incoming mail).
+ * Requires the gmail.settings.basic scope — accounts authenticated before
+ * that scope was added must re-run `npx tsx src/auth.ts <alias>`.
+ */
+export async function createFilter(opts: {
+  criteria: import('./types.js').FilterCriteria;
+  action: import('./types.js').FilterAction;
+  account?: string;
+}): Promise<import('./types.js').FilterInfo> {
+  const gmail = await getGmailClient(opts.account);
+
+  const response = await withRetry(() =>
+    gmail.users.settings.filters.create({
+      userId: 'me',
+      requestBody: {
+        criteria: {
+          from: opts.criteria.from,
+          to: opts.criteria.to,
+          subject: opts.criteria.subject,
+          query: opts.criteria.query,
+          hasAttachment: opts.criteria.hasAttachment,
+          excludeChats: opts.criteria.excludeChats,
+          size: opts.criteria.size,
+          sizeComparison: opts.criteria.sizeComparison,
+        },
+        action: {
+          addLabelIds: opts.action.addLabelIds,
+          removeLabelIds: opts.action.removeLabelIds,
+          forward: opts.action.forward,
+        },
+      },
+    })
+  );
+
+  return {
+    id: response.data.id || '',
+    criteria: opts.criteria,
+    action: opts.action,
+  };
+}
+
+/**
+ * List all Gmail filters (rules) for an account.
+ */
+export async function listFilters(opts?: {
+  account?: string;
+}): Promise<import('./types.js').FilterInfo[]> {
+  const gmail = await getGmailClient(opts?.account);
+
+  const response = await withRetry(() =>
+    gmail.users.settings.filters.list({ userId: 'me' })
+  );
+
+  return (response.data.filter || []).map(f => ({
+    id: f.id || '',
+    criteria: f.criteria || {},
+    action: f.action || {},
+  }));
+}
+
+/**
  * List all labels for an account.
  */
 export async function listLabels(opts?: {

@@ -20,9 +20,10 @@ const SCOPES = [
   'https://www.googleapis.com/auth/gmail.modify',
   'https://www.googleapis.com/auth/gmail.send',
   'https://www.googleapis.com/auth/gmail.compose',
+  'https://www.googleapis.com/auth/gmail.settings.basic',
 ];
 
-const REDIRECT_URI = 'http://localhost:3000/oauth2callback';
+const REDIRECT_URI = 'http://localhost:3005';
 
 /**
  * Load GCP OAuth credentials from credentials.json at project root.
@@ -111,7 +112,7 @@ export async function authenticateAccount(account: AccountConfig): Promise<void>
   return new Promise((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
       try {
-        const url = new URL(req.url || '', 'http://localhost:3000');
+        const url = new URL(req.url || '', 'http://localhost:3005');
         const code = url.searchParams.get('code');
 
         if (code) {
@@ -142,8 +143,8 @@ export async function authenticateAccount(account: AccountConfig): Promise<void>
       }
     });
 
-    server.listen(3000, () => {
-      console.log('Waiting for OAuth callback on http://localhost:3000...');
+    server.listen(3005, () => {
+      console.log('Waiting for OAuth callback on http://localhost:3005...');
     });
 
     // Timeout after 5 minutes

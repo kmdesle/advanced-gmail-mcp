@@ -116,6 +116,49 @@ export interface BatchResult {
   message_ids: string[];
 }
 
+/** Lightweight preview of a bulk query: count estimate + a small sample. */
+export interface BulkPreviewResult {
+  query: string;
+  estimated_count: number;
+  sample: EmailSummary[];
+  top_senders: Array<{ from: string; count: number }>;
+}
+
+/** Result from a bulk sweep execution. */
+export interface BulkExecuteResult {
+  success: boolean;
+  query: string;
+  action: 'archive' | 'label';
+  modified_count: number;
+  batches: number;
+}
+
+/** A Gmail filter's criteria. */
+export interface FilterCriteria {
+  from?: string | null;
+  to?: string | null;
+  subject?: string | null;
+  query?: string | null;
+  hasAttachment?: boolean | null;
+  excludeChats?: boolean | null;
+  size?: number | null;
+  sizeComparison?: string | null;
+}
+
+/** A Gmail filter's action. */
+export interface FilterAction {
+  addLabelIds?: string[] | null;
+  removeLabelIds?: string[] | null;
+  forward?: string | null;
+}
+
+/** A Gmail filter (rule). */
+export interface FilterInfo {
+  id: string;
+  criteria: FilterCriteria;
+  action: FilterAction;
+}
+
 /** OAuth token shape stored on disk. */
 export interface StoredToken {
   access_token: string;
