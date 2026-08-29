@@ -95,6 +95,35 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
   throw lastError;
 }
 
+/**
+ * Run `fn` over `items` with at most `limit` in flight at once.
+ * listMessages/searchMessages need one `.get()` per matched message — doing
+ * that sequentially made any non-trivial query take tens of seconds to
+ * minutes (diagnosed 2026-08-29 chasing an Ask Wisp "hang" that turned out
+ * to just be this). 10 concurrent requests stays well under Gmail API's
+ * per-user quota for the metadata-only `.get()` calls these are used for.
+ */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]);
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+const METADATA_FETCH_CONCURRENCY = 10;
+
 // ---------------------------------------------------------------------------
 // Header / body extraction helpers
 // ---------------------------------------------------------------------------
@@ -238,6 +267,19 @@ interface MimeOptions {
 }
 
 /**
+ * RFC 2822 headers are 7-bit ASCII only — any non-ASCII character (emoji,
+ * accents, etc.) must be RFC 2047 "encoded word" wrapped, or mail clients
+ * interpret the raw UTF-8 bytes as Latin-1/cp1252 and render mojibake
+ * (e.g. 📬 becomes "ðŸ“¬"). Only Subject is encoded here since To/Cc/Bcc are
+ * plain addr-specs in this codebase (no display names to encode).
+ */
+function encodeHeaderValue(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  if (/^[\x00-\x7F]*$/.test(value)) return value;
+  return `=?UTF-8?B?${Buffer.from(value, 'utf-8').toString('base64')}?=`;
+}
+
+/**
  * Build an RFC 2822 message and encode as base64url for the Gmail API.
  */
 function buildRawMessage(opts: MimeOptions): string {
@@ -247,7 +289,7 @@ function buildRawMessage(opts: MimeOptions): string {
   lines.push(`To: ${opts.to}`);
   if (opts.cc) lines.push(`Cc: ${opts.cc}`);
   if (opts.bcc) lines.push(`Bcc: ${opts.bcc}`);
-  lines.push(`Subject: ${opts.subject}`);
+  lines.push(`Subject: ${encodeHeaderValue(opts.subject)}`);
   if (opts.in_reply_to) lines.push(`In-Reply-To: ${opts.in_reply_to}`);
   if (opts.references) lines.push(`References: ${opts.references}`);
   lines.push(`MIME-Version: 1.0`);
@@ -304,9 +346,8 @@ export async function listMessages(opts: {
 
   if (allMessageRefs.length === 0) return [];
 
-  // Fetch metadata for each message
-  const results: EmailSummary[] = [];
-  for (const msg of allMessageRefs) {
+  // Fetch metadata for each message, up to METADATA_FETCH_CONCURRENCY at once
+  return mapWithConcurrency(allMessageRefs, METADATA_FETCH_CONCURRENCY, async (msg) => {
     const full = await withRetry(() =>
       gmail.users.messages.get({
         userId: 'me',
@@ -315,10 +356,8 @@ export async function listMessages(opts: {
         metadataHeaders: ['From', 'To', 'Subject', 'Date'],
       })
     );
-    results.push(toEmailSummary(full.data));
-  }
-
-  return results;
+    return toEmailSummary(full.data);
+  });
 }
 
 /**
@@ -381,9 +420,8 @@ export async function searchMessages(opts: {
 
   if (allMessageRefs.length === 0) return [];
 
-  // Fetch metadata for each message
-  const results: EmailSummary[] = [];
-  for (const msg of allMessageRefs) {
+  // Fetch metadata for each message, up to METADATA_FETCH_CONCURRENCY at once
+  return mapWithConcurrency(allMessageRefs, METADATA_FETCH_CONCURRENCY, async (msg) => {
     const full = await withRetry(() =>
       gmail.users.messages.get({
         userId: 'me',
@@ -392,10 +430,8 @@ export async function searchMessages(opts: {
         metadataHeaders: ['From', 'To', 'Subject', 'Date'],
       })
     );
-    results.push(toEmailSummary(full.data));
-  }
-
-  return results;
+    return toEmailSummary(full.data);
+  });
 }
 
 /**
