@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { mkdtemp, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it, mock } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
@@ -12,6 +14,9 @@ import {
   startMcpHttpServer,
   type RunningMcpHttpServer,
 } from '../src/server.js';
+
+const REPO_ROOT = join(import.meta.dirname, '..');
+const SERVER_ENTRY = join(REPO_ROOT, 'src', 'server.ts');
 
 const TOKEN = 'integration-test-token';
 const RESPONSE_MARKER = 'mock-gmail-label-response';
@@ -159,6 +164,63 @@ describe('authenticated Streamable HTTP server', { concurrency: false }, () => {
       assert.doesNotMatch(line, new RegExp(REQUEST_MARKER));
       assert.doesNotMatch(line, new RegExp(RESPONSE_MARKER));
       assert.doesNotMatch(line, /authorization|origin|host/i);
+    }
+  });
+});
+
+describe('transport selection (HTTP only when fully configured, stdio otherwise)', { concurrency: false }, () => {
+  it('falls back to stdio when MCP_HTTP_PORT and MCP_TOKEN_FILE are both unset', async () => {
+    const env: Record<string, string | undefined> = { ...process.env };
+    delete env.MCP_HTTP_PORT;
+    delete env.MCP_TOKEN_FILE;
+
+    const client = new Client({ name: 'gmail-mcp-stdio-test', version: '1.0.0' });
+    const transport = new StdioClientTransport({
+      command: 'cmd',
+      args: ['/c', 'npx', 'tsx', SERVER_ENTRY],
+      cwd: REPO_ROOT,
+      env: env as Record<string, string>,
+      stderr: 'ignore',
+    });
+    await client.connect(transport);
+    try {
+      const tools = (await client.listTools()).tools.map((t) => t.name);
+      assert.ok(tools.includes('list_emails'), `expected the real registered tool set, got: ${tools.join(', ')}`);
+    } finally {
+      await client.close();
+    }
+  });
+
+  async function expectHalfSetFailure(env: Record<string, string | undefined>): Promise<string> {
+    const child = spawn('cmd', ['/c', 'npx', 'tsx', SERVER_ENTRY], {
+      cwd: REPO_ROOT,
+      env: env as Record<string, string>,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      windowsHide: true,
+    });
+    let stderr = '';
+    child.stderr!.setEncoding('utf8');
+    child.stderr!.on('data', (chunk: string) => { stderr += chunk; });
+    const code = await new Promise<number | null>((resolve) => child.once('exit', resolve));
+    assert.notEqual(code, 0, `expected a non-zero exit for a half-set env, got ${code}: ${stderr}`);
+    return stderr;
+  }
+
+  it('fails fast, with a clear message, when only MCP_HTTP_PORT is set', async () => {
+    const stderr = await expectHalfSetFailure({ ...process.env, MCP_HTTP_PORT: '0', MCP_TOKEN_FILE: undefined });
+    assert.match(stderr, /MCP_HTTP_PORT and MCP_TOKEN_FILE must both be set/);
+  });
+
+  it('fails fast, with a clear message, when only MCP_TOKEN_FILE is set', async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), 'gmail-mcp-half-set-test-'));
+    const tokenFile = join(tempDirectory, 'token.txt');
+    await writeFile(tokenFile, 'irrelevant', 'utf8');
+    try {
+      const stderr = await expectHalfSetFailure({ ...process.env, MCP_HTTP_PORT: undefined, MCP_TOKEN_FILE: tokenFile });
+      assert.match(stderr, /MCP_HTTP_PORT and MCP_TOKEN_FILE must both be set/);
+    } finally {
+      await unlink(tokenFile);
+      await rmdir(tempDirectory);
     }
   });
 });

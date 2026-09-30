@@ -8,6 +8,7 @@ import {
 } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { registerAllTools } from './tools/index.js';
@@ -311,12 +312,6 @@ export async function startMcpHttpServer(
   };
 }
 
-function requiredEnvironmentVariable(name: 'MCP_HTTP_PORT' | 'MCP_TOKEN_FILE'): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`${name} is required.`);
-  return value;
-}
-
 function parseEnvironmentPort(value: string): number {
   if (!/^\d+$/.test(value)) {
     throw new Error('MCP_HTTP_PORT must be an integer between 1 and 65535.');
@@ -329,9 +324,23 @@ function parseEnvironmentPort(value: string): number {
   return port;
 }
 
+// Both env vars set -> HTTP. Neither set -> stdio (this server's behavior before the HTTP transport
+// existed). Exactly one set is a misconfiguration and must fail loud, not silently pick a mode.
 async function main(): Promise<void> {
-  const port = parseEnvironmentPort(requiredEnvironmentVariable('MCP_HTTP_PORT'));
-  const tokenFile = requiredEnvironmentVariable('MCP_TOKEN_FILE');
+  const portValue = process.env.MCP_HTTP_PORT;
+  const tokenFile = process.env.MCP_TOKEN_FILE;
+
+  if (portValue === undefined && tokenFile === undefined) {
+    const transport = new StdioServerTransport();
+    await createGmailMcpServer().connect(transport);
+    return;
+  }
+
+  if (portValue === undefined || !tokenFile) {
+    throw new Error('MCP_HTTP_PORT and MCP_TOKEN_FILE must both be set to use HTTP transport, or both left unset to use stdio.');
+  }
+
+  const port = parseEnvironmentPort(portValue);
   await startMcpHttpServer({ port, tokenFile });
 }
 
