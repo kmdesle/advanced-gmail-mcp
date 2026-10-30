@@ -193,7 +193,14 @@ that account's next poll. The watcher only calls `users.history.list`
 snippets, or attachment information. Existing tokens may have broader scopes;
 these operations only require `gmail.readonly`. Token refresh follows the
 existing client behavior. No new dependencies, paid services, AI, Pub/Sub, or
-cloud resources are used. Slack posting is disabled; no Slack integration ships.
+cloud resources are used. On an ERROR alert (five failed polls or
+`invalid_grant`), the watcher posts one 🔴 message per failure streak using
+`SLACK_ALERTS_ACTION_WEBHOOK_URL` from `~/.config/desler/alerts.env`. When the
+streak recovers, it posts one 🟢 message if
+`SLACK_ALERTS_OK_WEBHOOK_URL` is configured. The file accepts `KEY='value'`
+and `KEY="value"` lines. Missing action configuration and failed posts are
+logged without exposing URLs or stopping the poll loop. Sender matches do not
+post to Slack.
 
 Create `~/.config/gmail-alerts/rules.json` as a JSON array, for example:
 
