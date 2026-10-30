@@ -125,6 +125,7 @@ Then use `/email` or `/checkemail` in Claude Code.
 | `list_emails` | List inbox or label emails |
 | `search_emails` | Search with Gmail query syntax |
 | `read_email` | Read full email by ID |
+| `download_attachment` | Save an attachment by ID or exact filename to an existing directory |
 | `get_thread` | Get full thread with all messages |
 | `get_labels` | List all labels |
 | `send_email` | Send a new email |

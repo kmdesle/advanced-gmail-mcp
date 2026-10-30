@@ -36,6 +36,8 @@ export interface AttachmentInfo {
   filename: string;
   mimeType: string;
   size: number;
+  attachment_id: string;
+  part_id: string;
 }
 
 /** Thread with its messages. */

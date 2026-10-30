@@ -7,7 +7,7 @@
     "auth": "tsx src/auth.ts",
     "auth:check": "tsx src/auth.ts --check",
     "start": "tsx src/server.ts",
-    "test": "tsx --test tests/server.test.ts tests/calendar.test.ts",
+    "test": "tsx --test tests/server.test.ts tests/calendar.test.ts tests/attachments.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc"
   },
