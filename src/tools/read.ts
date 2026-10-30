@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { getMessage } from '../gmail/client.js';
+import { gmailDeps } from '../gmail/client.js';
 
 export const readEmailParams = {
   message_id: z.string().describe('The Gmail message ID to read'),
@@ -15,7 +15,7 @@ export function registerReadEmail(server: McpServer): void {
     readEmailParams,
     async ({ message_id, account, format }) => {
       try {
-        const result = await getMessage({
+        const result = await gmailDeps.getMessage({
           messageId: message_id,
           account: account ?? undefined,
           format: (format as 'full' | 'metadata' | 'minimal') ?? undefined,

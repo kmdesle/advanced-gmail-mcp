@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerListEmails } from './list.js';
 import { registerSearchEmails } from './search.js';
 import { registerReadEmail } from './read.js';
+import { registerDownloadAttachment } from './download-attachment.js';
 import { registerGetThread } from './thread.js';
 import { registerGetLabels } from './labels.js';
 import { registerSendEmail } from './send.js';
@@ -26,6 +27,7 @@ export function registerAllTools(server: McpServer): void {
   registerListEmails(server);
   registerSearchEmails(server);
   registerReadEmail(server);
+  registerDownloadAttachment(server);
   registerGetThread(server);
   registerGetLabels(server);
   registerListFilters(server);

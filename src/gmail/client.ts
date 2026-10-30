@@ -1,6 +1,9 @@
 import { google } from 'googleapis';
 import type { gmail_v1 } from 'googleapis';
 import type { Auth } from 'googleapis';
+import { createHash } from 'node:crypto';
+import { lstat, open, realpath, stat } from 'node:fs/promises';
+import { basename, extname, join, resolve, sep } from 'node:path';
 import { type AccountConfig, resolveAccount } from '../config.js';
 import { getAuthClient } from './auth.js';
 import type {
@@ -28,6 +31,14 @@ interface CachedClient {
 
 const CLIENT_CACHE = new Map<string, CachedClient>();
 const CLIENT_TTL_MS = 50 * 60 * 1000; // 50 minutes
+
+/** Test seam for attachment operations; tests replace this without loading credentials. */
+export const gmailDeps = {
+  getGmailClient,
+  async getMessage(opts: { messageId: string; account?: string; format?: 'full' | 'metadata' | 'minimal' }) {
+    return getMessage(opts);
+  },
+};
 
 /**
  * Load the cached Gmail client and the OAuth2 client it was built with.
@@ -191,6 +202,8 @@ function extractAttachments(payload: gmail_v1.Schema$MessagePart): AttachmentInf
       filename: payload.filename,
       mimeType: payload.mimeType || 'application/octet-stream',
       size: payload.body.size || 0,
+      attachment_id: payload.body.attachmentId,
+      part_id: payload.partId || '',
     });
   }
 
@@ -395,6 +408,93 @@ export async function getMessage(opts: {
   );
 
   return toEmailFull(response.data);
+}
+
+const MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024;
+
+export interface DownloadAttachmentResult {
+  path: string;
+  size: number;
+  mimeType: string;
+  sha256: string;
+}
+
+function safeFilename(filename: string): string {
+  if (filename.includes('/') || filename.includes('\\') || filename === '.' || filename === '..') {
+    throw new Error('Attachment filename must not contain path traversal.');
+  }
+  const sanitized = basename(filename).replace(/[\0-\x1f<>:"|?*]/g, '_').trim();
+  if (!sanitized || sanitized === '.' || sanitized === '..') {
+    throw new Error('Attachment filename is invalid.');
+  }
+  return sanitized;
+}
+
+/** Save a message attachment locally and return metadata only. */
+export async function downloadAttachment(opts: {
+  messageId: string;
+  attachmentId?: string;
+  filename?: string;
+  destDir: string;
+  account?: string;
+}): Promise<DownloadAttachmentResult> {
+  if (!opts.attachmentId && !opts.filename) {
+    throw new Error('Provide attachment_id or filename.');
+  }
+  if (!opts.destDir || !resolve(opts.destDir).startsWith(sep) || !opts.destDir.startsWith(sep)) {
+    throw new Error('dest_dir must be an absolute path to an existing directory.');
+  }
+  if ((await lstat(opts.destDir)).isSymbolicLink()) throw new Error('dest_dir must not be a symlink.');
+  const destination = await realpath(opts.destDir);
+  const destinationStat = await stat(destination);
+  if (!destinationStat.isDirectory()) throw new Error('dest_dir must be an existing directory.');
+
+  const gmail = await gmailDeps.getGmailClient(opts.account);
+  const message = await withRetry(() => gmail.users.messages.get({
+    userId: 'me', id: opts.messageId, format: 'full',
+  }));
+  const attachments = message.data.payload ? extractAttachments(message.data.payload) : [];
+  const matches = opts.attachmentId
+    ? attachments.filter(item => item.attachment_id === opts.attachmentId)
+    : attachments.filter(item => item.filename === opts.filename);
+  if (!matches.length) throw new Error('Attachment not found in message.');
+  if (matches.length > 1) throw new Error('Attachment match is ambiguous.');
+  const attachment = matches[0];
+  if (attachment.size > MAX_ATTACHMENT_SIZE) throw new Error('Attachment exceeds the 25 MB size limit.');
+  const filename = safeFilename(attachment.filename);
+  const response = await withRetry(() => gmail.users.messages.attachments.get({
+    userId: 'me', messageId: opts.messageId, id: attachment.attachment_id,
+  }));
+  const encoded = response.data.data;
+  if (!encoded) throw new Error('Attachment content is missing.');
+  const bytes = Buffer.from(encoded.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+  if (bytes.byteLength > MAX_ATTACHMENT_SIZE) throw new Error('Attachment exceeds the 25 MB size limit.');
+
+  const ext = extname(filename);
+  const stem = ext ? filename.slice(0, -ext.length) : filename;
+  let path = join(destination, filename);
+  for (let suffix = 1; ; suffix++) {
+    const resolvedPath = resolve(path);
+    if (!resolvedPath.startsWith(destination + sep)) throw new Error('Resolved attachment path escapes dest_dir.');
+    try {
+      const file = await open(path, 'wx', 0o600);
+      try {
+        await file.writeFile(bytes);
+      } finally {
+        await file.close();
+      }
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      path = join(destination, `${stem} (${suffix})${ext}`);
+    }
+  }
+  return {
+    path,
+    size: bytes.byteLength,
+    mimeType: attachment.mimeType,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+  };
 }
 
 /**
