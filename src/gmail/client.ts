@@ -30,10 +30,10 @@ const CLIENT_CACHE = new Map<string, CachedClient>();
 const CLIENT_TTL_MS = 50 * 60 * 1000; // 50 minutes
 
 /**
- * Get an authenticated Gmail API client for an account.
- * Caches OAuth2Client per account with 50-min TTL.
+ * Load the cached Gmail client and the OAuth2 client it was built with.
+ * Calendar uses the same OAuth2 client instead of a second token refresh.
  */
-export async function getGmailClient(account?: string | AccountConfig): Promise<gmail_v1.Gmail> {
+async function loadCachedClient(account?: string | AccountConfig): Promise<CachedClient> {
   const resolved = typeof account === 'string' || account === undefined
     ? resolveAccount(account)
     : account;
@@ -42,19 +42,34 @@ export async function getGmailClient(account?: string | AccountConfig): Promise<
   const cached = CLIENT_CACHE.get(cacheKey);
 
   if (cached && Date.now() < cached.expiresAt) {
-    return cached.gmail;
+    return cached;
   }
 
   const authClient = await getAuthClient(resolved);
   const gmail = google.gmail({ version: 'v1', auth: authClient });
 
-  CLIENT_CACHE.set(cacheKey, {
+  const entry: CachedClient = {
     client: authClient,
     gmail,
     expiresAt: Date.now() + CLIENT_TTL_MS,
-  });
+  };
+  CLIENT_CACHE.set(cacheKey, entry);
+  return entry;
+}
 
-  return gmail;
+/**
+ * Get an authenticated Gmail API client for an account.
+ * Caches OAuth2Client per account with 50-min TTL.
+ */
+export async function getGmailClient(account?: string | AccountConfig): Promise<gmail_v1.Gmail> {
+  return (await loadCachedClient(account)).gmail;
+}
+
+/**
+ * OAuth2 client shared with Gmail tools for this account (same cache entry).
+ */
+export async function getSharedAuthClient(account?: string | AccountConfig): Promise<Auth.OAuth2Client> {
+  return (await loadCachedClient(account)).client;
 }
 
 // ---------------------------------------------------------------------------

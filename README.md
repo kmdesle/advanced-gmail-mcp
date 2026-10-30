@@ -6,7 +6,7 @@ A Gmail [MCP server](https://modelcontextprotocol.io) for [Claude Code](https://
 
 ## Features
 
-- **12 tools**: list, search, read, thread, labels, send, draft, reply, archive, label, trash, batch modify
+- **Gmail and Google Calendar** on one server and one token store per Google account
 - **Multi-account** support with simple aliases
 - **OAuth2** authentication with interactive CLI flow
 - **Token auto-refresh** — re-authenticates transparently
@@ -27,13 +27,14 @@ npm install
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
 2. Create a new project (or select an existing one)
-3. Enable the **Gmail API**:
+3. Enable the **Gmail API** and the **Google Calendar API**:
    - APIs & Services → Enable APIs → search "Gmail API" → Enable
+   - Search "Google Calendar API" → Enable
 4. Configure the **OAuth consent screen**:
    - APIs & Services → OAuth consent screen
    - User type: External (or Internal if using Google Workspace)
    - Add your email address(es) as test users
-   - Add scopes: `gmail.readonly`, `gmail.modify`, `gmail.send`, `gmail.compose`
+   - Add scopes: `gmail.readonly`, `gmail.modify`, `gmail.send`, `gmail.compose`, `gmail.settings.basic`, and `https://www.googleapis.com/auth/calendar.events` (`calendar.events` — read and create/update events; this server does not request a delete scope)
 5. Create **OAuth credentials**:
    - APIs & Services → Credentials → Create Credentials → OAuth client ID
    - Application type: **Desktop app**
@@ -74,6 +75,17 @@ npm run auth:check
 ```
 
 The auth flow opens a browser window for each account. Tokens are saved to `./tokens/`.
+
+#### Calendar scope (one-time re-consent per account)
+
+`calendar.events` was added after the original Gmail scopes. Tokens saved before that do not include it. Gmail tools keep working for those accounts. Calendar tools do not: they return an error that names the account and tells you to re-run auth. They do not crash the server.
+
+```bash
+npm run auth -- work
+npm run auth:check
+```
+
+`npm run auth:check` prints `[calendar: granted]` or `[calendar: not granted]` on each account line. Re-run `npm run auth` (or `npm run auth -- <alias>`) once per account that should use Calendar. The Cloud project must already have the Calendar API enabled and `calendar.events` on the OAuth consent screen, or consent cannot grant the scope.
 
 ### 5. Add to Claude Code
 
@@ -122,8 +134,18 @@ Then use `/email` or `/checkemail` in Claude Code.
 | `label_email` | Add/remove labels |
 | `trash_email` | Move to trash |
 | `batch_modify` | Batch archive/trash/label |
+| `calendar_list_calendars` | List calendars on the account |
+| `calendar_list_events` | List events (`calendar_id` default `primary`, `time_min`, `time_max`, `max_results`, `query`) |
+| `calendar_get_event` | Get one event by id |
+| `calendar_freebusy` | Free/busy for a time range across a list of calendars |
+| `calendar_create_event` | Create an event (`summary`, `start`, `end`, optional `timezone`, `description`, `location`, `attendees`) |
+| `calendar_update_event` | Patch an event (only fields you pass) |
 
-All tools accept an optional `account` parameter (alias or email). Defaults to the account set in `accounts.json`.
+There is no calendar delete tool. Access is read plus create/update.
+
+`calendar_create_event` and `calendar_update_event` send `send_updates: "none"` unless you pass `send_updates` (`none`, `all`, or `externalOnly`). If `attendees` is set, you must pass `send_updates` yourself — the tool will not assume `"none"` and will not email guests without an explicit value.
+
+All tools accept an optional `account` parameter (alias or email). Defaults to the account set in `accounts.json`. Calendar uses the same OAuth client and token file as Gmail for that account.
 
 ## Commands
 
@@ -151,7 +173,8 @@ Quick 3-phase inbox sweep:
 | `No token for...` | Run `npm run auth -- <alias>` |
 | `Token refresh failed` | Re-authenticate: `npm run auth -- <alias>` |
 | `403 Forbidden` | Add your email as test user in GCP OAuth consent screen |
-| `403 insufficient scopes` | Re-authenticate to get updated scopes |
+| `403 insufficient scopes` | Re-authenticate to get updated scopes: `npm run auth -- <alias>` |
+| Calendar tool: scope is not granted | Enable the Calendar API, add `calendar.events` on the OAuth consent screen, then `npm run auth -- <alias>`. Gmail tools still work before that re-consent. |
 
 ## License
 

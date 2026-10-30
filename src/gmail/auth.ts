@@ -13,15 +13,47 @@ import {
 import type { StoredToken } from './types.js';
 
 /**
- * Expanded scopes: read, modify, send, compose.
+ * Gmail scopes plus calendar.events (read and create/update; not delete).
+ * Tokens issued before calendar.events still work for Gmail. Calendar tools
+ * report the missing scope and tell the caller to re-run `npm run auth`.
  */
-const SCOPES = [
+export const CALENDAR_EVENTS_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
+
+export const SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly',
   'https://www.googleapis.com/auth/gmail.modify',
   'https://www.googleapis.com/auth/gmail.send',
   'https://www.googleapis.com/auth/gmail.compose',
   'https://www.googleapis.com/auth/gmail.settings.basic',
+  CALENDAR_EVENTS_SCOPE,
 ];
+
+/**
+ * Whether a stored token's scope string includes calendar.events as its own scope.
+ * `calendar.events.readonly` must not count — it only shares a prefix.
+ */
+export function calendarScopeGranted(scope: string | undefined): boolean {
+  if (!scope) return false;
+  return scope.split(/\s+/).includes(CALENDAR_EVENTS_SCOPE);
+}
+
+/**
+ * Suffix printed by `npm run auth:check` after the Gmail scope summary.
+ * Gmail-only tokens stay OK for mail and show calendar as not granted.
+ */
+export function formatScopeInfo(scope: string | undefined): string {
+  const hasSendScope = scope?.includes('gmail.send');
+  const hasComposeScope = scope?.includes('gmail.compose');
+  const gmailInfo = hasSendScope && hasComposeScope
+    ? ' [send+compose]'
+    : hasSendScope
+      ? ' [send only]'
+      : ' [read/modify only]';
+  const calendarInfo = calendarScopeGranted(scope)
+    ? ' [calendar: granted]'
+    : ' [calendar: not granted]';
+  return gmailInfo + calendarInfo;
+}
 
 const REDIRECT_URI = 'http://localhost:3005';
 
@@ -175,15 +207,9 @@ export function checkAuthStatus(): void {
       try {
         const token: StoredToken = JSON.parse(fs.readFileSync(tokenPath, 'utf-8'));
         const expired = token.expiry_date && token.expiry_date < Date.now();
-        const hasSendScope = token.scope?.includes('gmail.send');
-        const hasComposeScope = token.scope?.includes('gmail.compose');
 
         status = expired ? 'EXPIRED (will auto-refresh)' : 'OK';
-        scopeInfo = hasSendScope && hasComposeScope
-          ? ' [send+compose]'
-          : hasSendScope
-            ? ' [send only]'
-            : ' [read/modify only]';
+        scopeInfo = formatScopeInfo(token.scope);
       } catch {
         status = 'TOKEN CORRUPT';
       }

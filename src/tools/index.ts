@@ -16,6 +16,7 @@ import { registerBatchModify } from './batch.js';
 import { registerBulkPreview, registerBulkExecute } from './bulk-sweep.js';
 import { registerCreateLabel } from './create-label.js';
 import { registerCreateFilter, registerListFilters } from './filters.js';
+import { registerCalendarTools } from './calendar.js';
 
 /**
  * Register all Gmail MCP tools with the server.
@@ -47,4 +48,7 @@ export function registerAllTools(server: McpServer): void {
   // Bulk tools (scale beyond a few hundred messages)
   registerBulkPreview(server);
   registerBulkExecute(server);
+
+  // Calendar tools (same account OAuth; read + create/update, no delete)
+  registerCalendarTools(server);
 }
