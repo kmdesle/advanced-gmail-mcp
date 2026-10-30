@@ -18,6 +18,14 @@ import {
 const REPO_ROOT = join(import.meta.dirname, '..');
 const SERVER_ENTRY = join(REPO_ROOT, 'src', 'server.ts');
 
+// The suite used to spawn `cmd /c`, which only exists on Windows. Same process either way.
+function serverLaunch(): { command: string; args: string[] } {
+  if (process.platform === 'win32') {
+    return { command: 'cmd', args: ['/c', 'npx', 'tsx', SERVER_ENTRY] };
+  }
+  return { command: 'npx', args: ['tsx', SERVER_ENTRY] };
+}
+
 const TOKEN = 'integration-test-token';
 const RESPONSE_MARKER = 'mock-gmail-label-response';
 const REQUEST_MARKER = 'mock-gmail-account-request';
@@ -175,9 +183,10 @@ describe('transport selection (HTTP only when fully configured, stdio otherwise)
     delete env.MCP_TOKEN_FILE;
 
     const client = new Client({ name: 'gmail-mcp-stdio-test', version: '1.0.0' });
+    const launch = serverLaunch();
     const transport = new StdioClientTransport({
-      command: 'cmd',
-      args: ['/c', 'npx', 'tsx', SERVER_ENTRY],
+      command: launch.command,
+      args: launch.args,
       cwd: REPO_ROOT,
       env: env as Record<string, string>,
       stderr: 'ignore',
@@ -192,7 +201,8 @@ describe('transport selection (HTTP only when fully configured, stdio otherwise)
   });
 
   async function expectHalfSetFailure(env: Record<string, string | undefined>): Promise<string> {
-    const child = spawn('cmd', ['/c', 'npx', 'tsx', SERVER_ENTRY], {
+    const launch = serverLaunch();
+    const child = spawn(launch.command, launch.args, {
       cwd: REPO_ROOT,
       env: env as Record<string, string>,
       stdio: ['ignore', 'ignore', 'pipe'],
