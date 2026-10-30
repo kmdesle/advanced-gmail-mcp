@@ -1,0 +1,17 @@
+[Unit]
+Description=Read-only Gmail sender alerts (60 second history polling)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace both paths with your permanent checkout and local Node executable.
+WorkingDirectory=%h/.dev/gmail-mcp
+ExecStart=/usr/bin/node %h/.dev/gmail-mcp/node_modules/tsx/dist/cli.mjs %h/.dev/gmail-mcp/src/alerts.ts
+Restart=on-failure
+RestartSec=60
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
