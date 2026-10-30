@@ -180,3 +180,97 @@ Quick 3-phase inbox sweep:
 ## License
 
 MIT
+
+## Read-only sender alerts ($0)
+
+`npm run alerts` runs a separate watcher; the MCP server entry point and tools
+are unchanged. It uses the existing account aliases and token-loading client.
+Only accounts listed in rules are watched. Each account polls immediately and
+then every 60 seconds, without overlapping its own requests. A slow poll delays
+that account's next poll. The watcher only calls `users.history.list`
+(`messageAdded`, `INBOX`), `users.messages.get` (`format=metadata`, headers
+`From`, `Subject`, `Date`), and `users.getProfile`. It never reads or stores bodies,
+snippets, or attachment information. Existing tokens may have broader scopes;
+these operations only require `gmail.readonly`. Token refresh follows the
+existing client behavior. No new dependencies, paid services, AI, Pub/Sub, or
+cloud resources are used. Slack posting is disabled; no Slack integration ships.
+
+Create `~/.config/gmail-alerts/rules.json` as a JSON array, for example:
+
+```json
+[
+  { "account": "tractic", "from": ["alfred.gpt@ktagroupinc.com"], "tag": "ALFRED" },
+  { "account": "tractic", "from": ["greg.namrow@tractic.io"], "tag": "GREG" }
+]
+```
+
+`account` must be an exact alias in the existing `accounts.json`. `from` is a
+nonempty list of exact mailbox addresses, matched case-insensitively after
+extracting the address from a display-name header. Optional `subject_contains`
+is a nonempty array of literal, case-insensitive substrings; any one must match.
+Each matching rule emits an alert. Restart the watcher after changing rules.
+It does not create or edit rules, accounts, credentials, or authentication setup.
+
+State is saved atomically in `~/.local/state/gmail-alerts/<account>.json`.
+First startup seeds the current profile history ID; it does not scan old mail.
+An expired history ID (404) logs a JSON `gap` event to stdout/journald and reseeds
+from the profile. Mail in that gap cannot be recovered by this watcher.
+History is paginated and message IDs are deduplicated within each poll. Cursors
+advance only after processing all pages and messages. Delivery is at least once:
+a crash or partial failure after appending alerts but before saving the cursor
+can repeat alerts. Consumers can deduplicate by account, tag, and message ID.
+Messages deleted before their metadata fetch (404) are skipped.
+
+Matches append to `~/.local/state/gmail-alerts/alerts.jsonl` with exactly:
+
+```json
+{"ts":"2026-10-30T00:00:00.000Z","account":"tractic","tag":"ALFRED","from":"Alfred <alfred.gpt@ktagroupinc.com>","subject":"Status update","message_id":"example-message","thread_id":"example-thread"}
+```
+
+`ts` is observation time in UTC. After five consecutive failed polls, or
+immediately on `invalid_grant`, the watcher appends an alert with tag `ERROR`,
+a diagnostic subject, and empty sender/message/thread fields. It emits one
+ERROR per failure streak and resets on success. Polling continues for recovery.
+A daily per-account JSON `heartbeat` event and sanitized failure counts go to
+stdout/journald. If state storage itself fails, an alert cannot be persisted;
+the service exits and systemd retries. Alert files contain sender/subject data;
+new directories/files are private. Use only one watcher process per state directory.
+
+### Install the user service (manual)
+
+Use a permanent checkout with its existing dependencies and authenticated tokens.
+Copy the supplied unit, then edit its `WorkingDirectory` and `ExecStart` paths
+for that checkout and the absolute Node executable (`command -v node`):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp systemd/gmail-alerts.service ~/.config/systemd/user/
+# Edit ~/.config/systemd/user/gmail-alerts.service paths before starting it.
+systemctl --user daemon-reload
+systemctl --user enable --now gmail-alerts.service
+journalctl --user -u gmail-alerts.service -f
+```
+
+The repository ships the unit only; it does not install or enable it. User
+services require an active user manager (lingering is an administrator choice).
+Stop with `systemctl --user disable --now gmail-alerts.service`. Preserve the
+state directory to resume at its cursor; removing state deliberately resets the
+baseline and skips intervening mail. Alert rotation/retention is operator managed.
+
+### Coordinator Monitor
+
+Run this long-lived command through the coordinator's **Monitor** tool to receive
+new JSON alerts as live events (create the file first if no match has arrived):
+
+```bash
+mkdir -p ~/.local/state/gmail-alerts
+# Keep the directory private, including when creating it manually.
+chmod 700 ~/.local/state/gmail-alerts
+touch ~/.local/state/gmail-alerts/alerts.jsonl
+chmod 600 ~/.local/state/gmail-alerts/alerts.jsonl
+tail -n 0 -F ~/.local/state/gmail-alerts/alerts.jsonl | jq --unbuffered -c .
+```
+
+Inspect `ERROR` alerts for authentication failures and the service journal for
+gaps or missing heartbeats. `jq` is only a convenience for the Monitor command;
+the watcher does not require it.
