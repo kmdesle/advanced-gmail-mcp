@@ -1,5 +1,6 @@
 import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import type { gmail_v1 } from 'googleapis';
 
 export interface Rule {
@@ -26,6 +27,15 @@ export interface ReadonlyGmail {
     messages: { get(params: gmail_v1.Params$Resource$Users$Messages$Get): Promise<{ data: gmail_v1.Schema$Message }> };
     getProfile(params: gmail_v1.Params$Resource$Users$Getprofile): Promise<{ data: gmail_v1.Schema$Profile }>;
   };
+}
+
+function parseWebhookConfig(value: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const line of value.split(/\r?\n/)) {
+    const match = line.match(/^\s*(SLACK_ALERTS_ACTION_WEBHOOK_URL|SLACK_ALERTS_OK_WEBHOOK_URL)\s*=\s*(.*?)\s*$/);
+    if (match) result[match[1]] = match[2].replace(/^(?:'([\s\S]*)'|"([\s\S]*)")$/, '$1$2');
+  }
+  return result;
 }
 
 export function parseRules(value: unknown): Rule[] {
@@ -72,6 +82,7 @@ export class AccountWatcher {
     private client: () => Promise<ReadonlyGmail>,
     private log: (line: string) => void = console.log,
     private now: () => Date = () => new Date(),
+    private alertsEnvPath = join(homedir(), '.config/desler/alerts.env'),
   ) {
     if (!/^[a-zA-Z0-9_-]+$/.test(account)) throw new Error('Unsafe account alias');
   }
@@ -88,6 +99,30 @@ export class AccountWatcher {
 
   private async emit(alert: Alert) {
     await appendFile(join(this.stateDirectory, 'alerts.jsonl'), JSON.stringify(alert) + '\n', { mode: 0o600 });
+  }
+
+  private async slack(kind: 'action' | 'ok', message: string, required: boolean): Promise<void> {
+    let values: Record<string, string>;
+    try {
+      values = parseWebhookConfig(await readFile(this.alertsEnvPath, 'utf8'));
+    } catch {
+      if (required) this.logEvent('slack_warning', { reason: 'configuration_unavailable' });
+      return;
+    }
+    const url = values[kind === 'action' ? 'SLACK_ALERTS_ACTION_WEBHOOK_URL' : 'SLACK_ALERTS_OK_WEBHOOK_URL'];
+    if (!url) {
+      if (required) this.logEvent('slack_warning', { reason: 'webhook_missing' });
+      return;
+    }
+    try {
+      const response = await fetch(url, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: message }), signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    } catch {
+      this.logEvent('slack_warning', { reason: 'post_failed', webhook: kind });
+    }
   }
 
   private async seed(gmail: ReadonlyGmail, gap: boolean) {
@@ -109,8 +144,10 @@ export class AccountWatcher {
         this.heartbeatDay = day;
       }
       await this.pollHistory();
+      const recovered = this.errorReported;
       this.failures = 0;
       this.errorReported = false;
+      if (recovered) await this.slack('ok', `🟢 📬 gmail-alerts: ${this.account} watcher recovered.`, false);
     } catch (error) {
       this.failures++;
       const revoked = invalidGrant(error);
@@ -123,6 +160,8 @@ export class AccountWatcher {
           message_id: '', thread_id: '',
         });
         this.errorReported = true;
+        const diagnostic = revoked ? 'invalid_grant' : '5 consecutive poll failures';
+        await this.slack('action', `🔴 📬 gmail-alerts: ${this.account} watcher failing: ${diagnostic}. Fix: check the gmail-mcp token for ${this.account} (re-auth), then systemctl --user restart gmail-alerts.`, true);
       }
     } finally {
       this.busy = false;

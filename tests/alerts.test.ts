@@ -17,6 +17,8 @@ async function setup(seed = true) {
   if (seed) await writeFile(join(dir, 'tractic.json'), JSON.stringify({ historyId: '10' }));
   const calls: unknown[] = [];
   const logs: string[] = [];
+  const envPath = join(dir, 'alerts.env');
+  await writeFile(envPath, "SLACK_ALERTS_ACTION_WEBHOOK_URL='https://hooks.invalid/action'\nSLACK_ALERTS_OK_WEBHOOK_URL=\"https://hooks.invalid/ok\"\n");
   const gmail: ReadonlyGmail = { users: {
     history: { list: async params => {
       calls.push(params);
@@ -31,10 +33,58 @@ async function setup(seed = true) {
     } },
     getProfile: async params => { calls.push(params); return { data: { historyId: '30' } }; },
   } };
-  const watcher = new AccountWatcher('tractic', [rule], dir, async () => gmail, line => logs.push(line), () => new Date('2026-10-30T00:00:00Z'));
+  const watcher = new AccountWatcher('tractic', [rule], dir, async () => gmail, line => logs.push(line), () => new Date('2026-10-30T00:00:00Z'), envPath);
   const alerts = async (): Promise<Alert[]> => (await readFile(join(dir, 'alerts.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-  return { dir, calls, logs, gmail, watcher, alerts };
+  return { dir, calls, logs, gmail, watcher, alerts, envPath };
 }
+
+test('posts once per error streak, posts recovery, and does not leak URL in logs', async t => {
+  const f = await setup();
+  const originalFetch = globalThis.fetch;
+  const posts: { url: string; body: string }[] = [];
+  globalThis.fetch = (async (input, init) => {
+    posts.push({ url: String(input), body: String(init?.body) });
+    return new Response('', { status: 200 });
+  }) as typeof fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  f.gmail.users.history.list = async () => { throw new Error('offline'); };
+  for (let i = 0; i < 7; i++) await f.watcher.poll();
+  assert.equal(posts.length, 1);
+  assert.match(JSON.parse(posts[0].body).text, /^🔴 📬 gmail-alerts: tractic/);
+  assert.match(JSON.parse(posts[0].body).text, /tractic watcher failing/);
+  f.gmail.users.history.list = async () => ({ data: { historyId: '21', history: [] } });
+  await f.watcher.poll();
+  assert.equal(posts.length, 2);
+  assert.match(JSON.parse(posts[1].body).text, /^🟢/);
+  assert.doesNotMatch(f.logs.join(''), /hooks\.invalid/);
+});
+
+test('missing action webhook warns without crashing and sender matches do not post', async t => {
+  const f = await setup();
+  await writeFile(f.envPath, '');
+  const originalFetch = globalThis.fetch;
+  let count = 0;
+  globalThis.fetch = (async () => { count++; return new Response('', { status: 200 }); }) as typeof fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  f.gmail.users.history.list = async () => { throw new Error('offline'); };
+  for (let i = 0; i < 5; i++) await f.watcher.poll();
+  assert.equal(count, 0);
+  assert.ok(f.logs.some(line => JSON.parse(line).event === 'slack_warning'));
+  f.gmail.users.history.list = async () => ({ data: { historyId: '21', history: [] } });
+  await f.watcher.poll();
+  assert.equal(count, 0);
+});
+
+test('failed Slack POST is contained and webhook URL is not logged', async t => {
+  const f = await setup();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => { throw new Error('https://hooks.invalid/action'); }) as typeof fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  f.gmail.users.history.list = async () => { throw new Error('offline'); };
+  for (let i = 0; i < 5; i++) await f.watcher.poll();
+  assert.equal((await f.alerts()).filter(a => a.tag === 'ERROR').length, 1);
+  assert.doesNotMatch(f.logs.join(''), /hooks\.invalid/);
+});
 
 test('rules use exact case-insensitive sender mailbox, account, and optional any subject substring', () => {
   assert.ok(matchesRule(rule, 'tractic', 'Alfred <ALFRED.GPT@ktagroupinc.com>', 'Anything'));
