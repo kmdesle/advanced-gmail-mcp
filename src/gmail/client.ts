@@ -35,7 +35,7 @@ const CLIENT_TTL_MS = 50 * 60 * 1000; // 50 minutes
 /** Test seam for attachment operations; tests replace this without loading credentials. */
 export const gmailDeps = {
   getGmailClient,
-  async getMessage(opts: { messageId: string; account?: string; format?: 'full' | 'metadata' | 'minimal' }) {
+  async getMessage(opts: { messageId: string; account?: string; format?: 'full' | 'metadata' | 'minimal'; headers?: string[]; authSummary?: boolean }) {
     return getMessage(opts);
   },
 };
@@ -395,19 +395,45 @@ export async function getMessage(opts: {
   messageId: string;
   account?: string;
   format?: 'full' | 'metadata' | 'minimal';
-}): Promise<EmailFull> {
-  const gmail = await getGmailClient(opts.account);
+  headers?: string[];
+  authSummary?: boolean;
+}): Promise<EmailFull | (EmailFull & { headers?: Record<string, string[]>; auth_summary?: { spf: string; dkim: string[]; dkim_domains: string[]; dmarc: string; list_unsubscribe: string[]; list_unsubscribe_post: string[] } })> {
+  const gmail = await gmailDeps.getGmailClient(opts.account);
   const format = opts.format ?? 'full';
+  const metadataHeaders = opts.headers || opts.authSummary
+    ? [...new Set([...(opts.headers || []), ...(opts.authSummary ? ['Authentication-Results', 'ARC-Authentication-Results', 'List-Unsubscribe', 'List-Unsubscribe-Post'] : [])])]
+    : undefined;
+  const requestFormat = metadataHeaders && format === 'minimal' ? 'metadata' : format;
 
   const response = await withRetry(() =>
     gmail.users.messages.get({
       userId: 'me',
       id: opts.messageId,
-      format,
+      format: requestFormat,
+      ...(metadataHeaders && requestFormat === 'metadata' ? { metadataHeaders } : {}),
     })
   );
 
-  return toEmailFull(response.data);
+  const email = toEmailFull(response.data);
+  if (!opts.headers && !opts.authSummary) return email;
+  const rawHeaders = response.data.payload?.headers || [];
+  const select = (names: string[]) => Object.fromEntries(names.map(name => [
+    name.toLowerCase(), rawHeaders.filter(h => h.name?.toLowerCase() === name.toLowerCase()).map(h => h.value || ''),
+  ]));
+  const result: EmailFull & { headers?: Record<string, string[]>; auth_summary?: { spf: string; dkim: string[]; dkim_domains: string[]; dmarc: string; list_unsubscribe: string[]; list_unsubscribe_post: string[] } } = { ...email };
+  if (opts.headers) result.headers = select(opts.headers);
+  if (opts.authSummary) {
+    const auth = rawHeaders.find(h => h.name?.toLowerCase() === 'authentication-results')?.value
+      || rawHeaders.find(h => h.name?.toLowerCase() === 'arc-authentication-results')?.value || '';
+    const results = (method: string) => [...auth.matchAll(new RegExp(`(?:^|[;\\s])${method}=([\\w-]+)([^;]*)`, 'gi'))];
+    const spf = results('spf')[0]?.[1]?.toLowerCase() || 'none';
+    const dkimResults = results('dkim');
+    const dkimDomains = dkimResults.map(match => match[2].match(/\bd=([\w.-]+)/i)?.[1]).filter((value): value is string => Boolean(value));
+    const dmarc = results('dmarc')[0]?.[1]?.toLowerCase() || 'none';
+    const values = (name: string) => rawHeaders.filter(h => h.name?.toLowerCase() === name.toLowerCase()).map(h => h.value || '');
+    result.auth_summary = { spf, dkim: dkimResults.map(match => match[1].toLowerCase()), dkim_domains: dkimDomains, dmarc, list_unsubscribe: values('List-Unsubscribe'), list_unsubscribe_post: values('List-Unsubscribe-Post') };
+  }
+  return result;
 }
 
 const MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024;

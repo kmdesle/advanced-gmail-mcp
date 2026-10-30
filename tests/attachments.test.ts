@@ -83,6 +83,68 @@ describe('download_attachment', { concurrency: false }, () => {
     assert.equal(value.attachments[0].part_id, 'part-att-id-check');
   });
 
+  it('read_email preserves default output and returns selected headers with repeats', async () => {
+    messageInstalled.mock.restore();
+    const payload = {
+      id: 'fixture', threadId: 'thread', labelIds: ['INBOX'],
+      payload: { mimeType: 'text/plain', body: {}, headers: [
+        { name: 'From', value: 'a@example.com' }, { name: 'Subject', value: 'Fixture' },
+        { name: 'Received', value: 'first' }, { name: 'received', value: 'second' },
+      ] },
+    };
+    const gmail = { users: { messages: { get: mock.fn(async () => ({ data: payload })) } } };
+    installed.mock.mockImplementation(async () => gmail as never);
+    try {
+      const expected = { id: 'fixture', threadId: 'thread', from: 'a@example.com', to: '', cc: '', bcc: '', subject: 'Fixture', date: '', body_text: '', body_html: '', labels: ['INBOX'], attachments: [] };
+      const defaultResult = await client.callTool({ name: 'read_email', arguments: { message_id: 'fixture' } });
+      assert.deepEqual(JSON.parse(resultText(defaultResult)), expected);
+      const selected = await client.callTool({ name: 'read_email', arguments: { message_id: 'fixture', headers: ['RECEIVED', 'x-missing'] } });
+      assert.deepEqual(JSON.parse(resultText(selected)).headers, { received: ['first', 'second'], 'x-missing': [] });
+    } finally {
+      installed.mock.mockImplementation(async () => ({ users: { messages: {
+        get: mock.fn(async () => ({ data: { id: 'msg-1', payload: { mimeType: 'multipart/mixed', body: {}, parts: [attachmentPayload] } } })),
+        attachments: { get: mock.fn(async () => ({ data: { data: attachmentData } })) },
+      } } } as never));
+      messageInstalled = mock.method(gmailDeps, 'getMessage', async () => ({
+        id: 'msg-1', threadId: 'thread-1', from: '', to: '', cc: '', bcc: '', subject: '', date: '', body_text: '', body_html: '', labels: [],
+        attachments: [{ filename: 'ids.pdf', mimeType: 'application/pdf', size: CONTENT.length, attachment_id: 'att-id-check', part_id: 'part-att-id-check' }],
+      }));
+    }
+  });
+
+  it('read_email parses auth results and falls back to ARC', async () => {
+    messageInstalled.mock.restore();
+    let fixture: Record<string, unknown> = { id: 'fixture', payload: { headers: [
+      { name: 'Authentication-Results', value: 'mx; spf=pass; dkim=pass header.d=one.example; dkim=fail header.d=two.example; dmarc=fail' },
+      { name: 'List-Unsubscribe', value: '<mailto:unsubscribe@example.com>' },
+      { name: 'List-Unsubscribe-Post', value: 'List-Unsubscribe=One-Click' },
+    ] } };
+    const gmail = { users: { messages: { get: mock.fn(async () => ({ data: fixture })) } } };
+    installed.mock.mockImplementation(async () => gmail as never);
+    try {
+      const parsed = await client.callTool({ name: 'read_email', arguments: { message_id: 'fixture', auth_summary: true } });
+      assert.deepEqual(JSON.parse(resultText(parsed)).auth_summary, {
+        spf: 'pass', dkim: ['pass', 'fail'], dkim_domains: ['one.example', 'two.example'], dmarc: 'fail',
+        list_unsubscribe: ['<mailto:unsubscribe@example.com>'], list_unsubscribe_post: ['List-Unsubscribe=One-Click'],
+      });
+      fixture = { id: 'fixture', payload: { headers: [{ name: 'ARC-Authentication-Results', value: 'arc; spf=fail; dkim=pass header.d=arc.example; dmarc=pass' }] } };
+      const fallback = await client.callTool({ name: 'read_email', arguments: { message_id: 'fixture', auth_summary: true } });
+      assert.deepEqual(JSON.parse(resultText(fallback)).auth_summary, { spf: 'fail', dkim: ['pass'], dkim_domains: ['arc.example'], dmarc: 'pass', list_unsubscribe: [], list_unsubscribe_post: [] });
+      fixture = { id: 'fixture', payload: { headers: [] } };
+      const missing = await client.callTool({ name: 'read_email', arguments: { message_id: 'fixture', auth_summary: true } });
+      assert.deepEqual(JSON.parse(resultText(missing)).auth_summary, { spf: 'none', dkim: [], dkim_domains: [], dmarc: 'none', list_unsubscribe: [], list_unsubscribe_post: [] });
+    } finally {
+      installed.mock.mockImplementation(async () => ({ users: { messages: {
+        get: mock.fn(async () => ({ data: { id: 'msg-1', payload: { mimeType: 'multipart/mixed', body: {}, parts: [attachmentPayload] } } })),
+        attachments: { get: mock.fn(async () => ({ data: { data: attachmentData } })) },
+      } } } as never));
+      messageInstalled = mock.method(gmailDeps, 'getMessage', async () => ({
+        id: 'msg-1', threadId: 'thread-1', from: '', to: '', cc: '', bcc: '', subject: '', date: '', body_text: '', body_html: '', labels: [],
+        attachments: [{ filename: 'ids.pdf', mimeType: 'application/pdf', size: CONTENT.length, attachment_id: 'att-id-check', part_id: 'part-att-id-check' }],
+      }));
+    }
+  });
+
   it('downloads by a unique exact filename', async () => {
     attachmentPayload = part('by-name.pdf', 'att-name');
     const result = await call({ filename: 'by-name.pdf' });
