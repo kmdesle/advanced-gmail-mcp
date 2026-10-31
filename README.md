@@ -282,3 +282,66 @@ tail -n 0 -F ~/.local/state/gmail-alerts/alerts.jsonl | jq --unbuffered -c .
 Inspect `ERROR` alerts for authentication failures and the service journal for
 gaps or missing heartbeats. `jq` is only a convenience for the Monitor command;
 the watcher does not require it.
+
+## Slack alerts watcher
+
+`npm run slack-alerts` runs a separate, read-only watcher (same pattern as the
+Gmail alerts watcher; the MCP server is unchanged). It watches **every channel
+the bot is a member of**, public and private. Channels are discovered with
+`users.conversations` at startup and every 15 minutes, so channels the app is
+added to later are picked up without a restart. It polls `conversations.history`
+every 60 seconds using plain `fetch` against `https://slack.com/api`, with no new
+dependencies. It never calls a Slack write method.
+
+**Setup.** Create a Slack app with a bot token (`xoxb-...`) and exactly these
+scopes: `channels:history`, `channels:read`, `groups:history`, `groups:read`.
+Invite the bot to each channel to watch. Put the token in an env file that only
+you can read (the token is never logged):
+
+```bash
+mkdir -p ~/.config/slack-alerts
+printf 'SLACK_ALERTS_BOT_TOKEN=xoxb-...\n' > ~/.config/slack-alerts/env
+chmod 600 ~/.config/slack-alerts/env
+```
+
+**Optional overrides**: `~/.config/slack-alerts/channels.json`. Without it every
+member channel is watched and its tag is the channel name.
+
+```json
+{ "exclude": ["random"], "tags": { "fleet-red-action": "RED", "fleet-amber-watch": "AMBER", "fleet-green-ok": "GREEN" } }
+```
+
+**Files**
+
+| File | Purpose |
+|------|---------|
+| `~/.local/state/slack-alerts/alerts.jsonl` | One line per new message |
+| `~/.local/state/slack-alerts/state.json` | Last seen `ts` per channel ID |
+| `~/.local/state/slack-alerts/backfill-<date>.jsonl` | Output of `--backfill` |
+
+A message line is `{"ts_iso","channel","tag","color","ts","text","bot_name"|"user","thread_ts"?}`.
+`text` is the first 500 characters. `color` is `red`, `amber` or `green` when the
+text starts with 🔴, 🟡 or 🟢, otherwise `null`. A channel seen for the first
+time (first run, or newly joined) starts at "now", so old history is not flooded
+into the feed. Thread replies are not fetched. Permalinks are not included.
+
+On an API error the watcher appends `{"ERROR":"<code>","channel","ts_iso"}`, at
+most once per distinct error and channel per hour. A 429 pauses all polling for
+the `Retry-After` time. A failure to write state exits the process so systemd
+restarts it.
+
+**Backfill** (one-shot, separate from the loop; does not touch `state.json`):
+
+```bash
+npm run slack-alerts -- --backfill 7
+```
+
+writes the last 7 days from all member channels to
+`~/.local/state/slack-alerts/backfill-<date>.jsonl` and exits.
+
+**Service.** `deploy/slack-alerts.service` is a user unit that reads the token
+from `EnvironmentFile=%h/.config/slack-alerts/env`. It is committed but not
+installed. Edit its paths, then copy it to `~/.config/systemd/user/` and run
+`systemctl --user enable --now slack-alerts.service`. Use one watcher per state
+directory. Follow the feed with the same Monitor `tail -F ... | jq` command as
+above, pointed at the Slack `alerts.jsonl`.
