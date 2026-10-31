@@ -647,6 +647,10 @@ async function resolveSender(
     return resolved.email;
   }
 
+  if (/[\r\n]/.test(fromInput)) {
+    throw new Error('Invalid "from" address: line breaks are not allowed.');
+  }
+
   const { email, displayName: customDisplayName } = parseFromAddress(fromInput);
   const normalizedEmail = email.toLowerCase();
   const primaryEmail = resolved.email.toLowerCase();

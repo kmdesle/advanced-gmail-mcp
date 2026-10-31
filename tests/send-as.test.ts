@@ -277,6 +277,20 @@ describe('send-as aliases and optional from parameter', { concurrency: false }, 
       assert.match(text, /support@cyberwingman\.ai/);
     });
 
+    it('rejects a from value containing line breaks (header injection)', async () => {
+      const res = await client.callTool({
+        name: 'send_email',
+        arguments: {
+          to: 'customer@example.com',
+          subject: 'Test',
+          body: 'Should fail',
+          from: 'Support\r\nBcc: attacker@evil.com <support@cyberwingman.ai>',
+        },
+      });
+      assert.equal(res.isError, true);
+      assert.match(resultText(res), /line breaks are not allowed/);
+    });
+
     it('calls without from behave exactly as before (default unchanged)', async () => {
       const res = await client.callTool({
         name: 'send_email',
