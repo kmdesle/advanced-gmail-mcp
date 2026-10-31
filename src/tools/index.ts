@@ -17,6 +17,7 @@ import { registerBatchModify } from './batch.js';
 import { registerBulkPreview, registerBulkExecute } from './bulk-sweep.js';
 import { registerCreateLabel } from './create-label.js';
 import { registerCreateFilter, registerListFilters } from './filters.js';
+import { registerListSendAs } from './send-as.js';
 import { registerCalendarTools } from './calendar.js';
 
 /**
@@ -31,6 +32,7 @@ export function registerAllTools(server: McpServer): void {
   registerGetThread(server);
   registerGetLabels(server);
   registerListFilters(server);
+  registerListSendAs(server);
 
   // Write tools
   registerSendEmail(server);

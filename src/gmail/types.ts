@@ -68,11 +68,21 @@ export interface LabelInfo {
   messagesUnread: number;
 }
 
+/** Send-as alias metadata. */
+export interface SendAsAlias {
+  sendAsEmail: string;
+  displayName: string;
+  isDefault: boolean;
+  verificationStatus: string;
+}
+
 /** Send/draft message input. */
 export interface ComposeInput {
   to: string;
   subject: string;
   body: string;
+  account?: string;
+  from?: string;
   cc?: string;
   bcc?: string;
   is_html?: boolean;
@@ -82,6 +92,8 @@ export interface ComposeInput {
 export interface ReplyInput {
   message_id: string;
   body: string;
+  account?: string;
+  from?: string;
   is_html?: boolean;
   reply_all?: boolean;
   cc?: string;
