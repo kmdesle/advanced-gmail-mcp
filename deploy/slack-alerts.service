@@ -1,0 +1,19 @@
+[Unit]
+Description=Read-only Slack alerts watcher (60 second polling of all member channels)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace both paths with your permanent checkout. Not installed by the repo.
+WorkingDirectory=%h/.dev/gmail-mcp
+ExecStart=/usr/bin/node %h/.dev/gmail-mcp/node_modules/tsx/dist/cli.mjs %h/.dev/gmail-mcp/src/slack-alerts.ts
+# File must be mode 600 and contain: SLACK_ALERTS_BOT_TOKEN=xoxb-...
+EnvironmentFile=%h/.config/slack-alerts/env
+Restart=on-failure
+RestartSec=60
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
