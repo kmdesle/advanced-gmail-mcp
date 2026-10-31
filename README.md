@@ -128,6 +128,7 @@ Then use `/email` or `/checkemail` in Claude Code.
 | `download_attachment` | Save an attachment by ID or exact filename to an existing directory |
 | `get_thread` | Get full thread with all messages |
 | `get_labels` | List all labels |
+| `list_send_as` | List verified send-as aliases (wraps users.settings.sendAs.list) |
 | `send_email` | Send a new email |
 | `draft_email` | Create a draft |
 | `reply_email` | Reply with proper threading |

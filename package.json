@@ -8,7 +8,7 @@
     "auth:check": "tsx src/auth.ts --check",
     "start": "tsx src/server.ts",
     "alerts": "tsx src/alerts.ts",
-    "test": "tsx --test tests/server.test.ts tests/calendar.test.ts tests/attachments.test.ts tests/alerts.test.ts",
+    "test": "tsx --test tests/server.test.ts tests/calendar.test.ts tests/attachments.test.ts tests/alerts.test.ts tests/send-as.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc"
   },

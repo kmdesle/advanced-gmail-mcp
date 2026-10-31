@@ -17,6 +17,7 @@ import type {
   DraftResult,
   ModifyResult,
   BatchResult,
+  SendAsAlias,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -32,11 +33,15 @@ interface CachedClient {
 const CLIENT_CACHE = new Map<string, CachedClient>();
 const CLIENT_TTL_MS = 50 * 60 * 1000; // 50 minutes
 
-/** Test seam for attachment operations; tests replace this without loading credentials. */
+/** Test seam for operations; tests replace this without loading credentials. */
 export const gmailDeps = {
+  resolveAccount,
   getGmailClient,
   async getMessage(opts: { messageId: string; account?: string; format?: 'full' | 'metadata' | 'minimal'; headers?: string[]; authSummary?: boolean }) {
     return getMessage(opts);
+  },
+  async listSendAs(opts?: { account?: string | AccountConfig }) {
+    return listSendAs(opts);
   },
 };
 
@@ -576,6 +581,121 @@ export async function searchMessages(opts: {
 }
 
 /**
+ * List all send-as aliases for an account.
+ * Wraps users.settings.sendAs.list.
+ */
+export async function listSendAs(opts?: {
+  account?: string | AccountConfig;
+}): Promise<SendAsAlias[]> {
+  const resolved = typeof opts?.account === 'object' && opts.account !== null && 'email' in opts.account
+    ? opts.account
+    : gmailDeps.resolveAccount(opts?.account);
+  const gmail = await gmailDeps.getGmailClient(resolved);
+
+  const response = await withRetry(() =>
+    gmail.users.settings.sendAs.list({ userId: 'me' })
+  );
+
+  return (response.data.sendAs || []).map((sa) => ({
+    sendAsEmail: sa.sendAsEmail || '',
+    displayName: sa.displayName || '',
+    isDefault: sa.isDefault ?? false,
+    verificationStatus:
+      sa.verificationStatus ||
+      (sa.isPrimary || (sa.sendAsEmail && sa.sendAsEmail.toLowerCase() === resolved.email.toLowerCase())
+        ? 'accepted'
+        : ''),
+  }));
+}
+
+/**
+ * Parse an RFC 2822 "From" string into email and optional display name.
+ * Handles "Name <email@example.com>", "\"Name\" <email@example.com>", or bare "email@example.com".
+ */
+export function parseFromAddress(input: string): { email: string; displayName?: string } {
+  const match = input.match(/^(.*?)\s*<([^>]+)>\s*$/);
+  if (match) {
+    let displayName = match[1].trim();
+    if (displayName.startsWith('"') && displayName.endsWith('"')) {
+      displayName = displayName.slice(1, -1).trim();
+    }
+    return {
+      email: match[2].trim(),
+      displayName: displayName.length > 0 ? displayName : undefined,
+    };
+  }
+  return {
+    email: input.trim(),
+    displayName: undefined,
+  };
+}
+
+/**
+ * Validate and format the sender ("From") address.
+ *
+ * If fromInput is omitted: returns account.email unchanged (exact backwards compatibility).
+ * If fromInput is provided:
+ * - Must match primary address or a sendAs alias with verificationStatus "accepted".
+ * - If invalid: fails closed naming all allowed aliases.
+ * - When from is an alias with no display name given, the alias's configured displayName is used.
+ */
+async function resolveSender(
+  resolved: AccountConfig,
+  fromInput?: string,
+): Promise<string> {
+  if (fromInput === undefined) {
+    return resolved.email;
+  }
+
+  if (/[\r\n]/.test(fromInput)) {
+    throw new Error('Invalid "from" address: line breaks are not allowed.');
+  }
+
+  const { email, displayName: customDisplayName } = parseFromAddress(fromInput);
+  const normalizedEmail = email.toLowerCase();
+  const primaryEmail = resolved.email.toLowerCase();
+
+  const aliases = await gmailDeps.listSendAs({ account: resolved });
+
+  const isPrimary = normalizedEmail === primaryEmail;
+  const matchingAlias = aliases.find(
+    (a) => a.sendAsEmail.toLowerCase() === normalizedEmail,
+  );
+  const isVerifiedAlias =
+    matchingAlias !== undefined &&
+    matchingAlias.verificationStatus.toLowerCase() === 'accepted';
+
+  if (!isPrimary && !isVerifiedAlias) {
+    const allowed = new Set<string>();
+    allowed.add(resolved.email);
+    for (const a of aliases) {
+      if (
+        a.verificationStatus.toLowerCase() === 'accepted' ||
+        a.sendAsEmail.toLowerCase() === primaryEmail
+      ) {
+        allowed.add(a.sendAsEmail);
+      }
+    }
+    const allowedList = Array.from(allowed).join(', ');
+    throw new Error(
+      `Invalid "from" address: "${email}". Allowed aliases: ${allowedList}`,
+    );
+  }
+
+  const chosenDisplayName =
+    customDisplayName ??
+    (matchingAlias?.displayName && matchingAlias.displayName.trim().length > 0
+      ? matchingAlias.displayName.trim()
+      : undefined);
+
+  if (chosenDisplayName && chosenDisplayName.length > 0) {
+    return `${encodeHeaderValue(chosenDisplayName)} <${email}>`;
+  }
+
+  return email;
+}
+
+/**
  * Send an email.
  */
 export async function sendMessage(opts: {
@@ -583,15 +703,17 @@ export async function sendMessage(opts: {
   subject: string;
   body: string;
   account?: string;
+  from?: string;
   cc?: string;
   bcc?: string;
   is_html?: boolean;
 }): Promise<SendResult> {
-  const resolved = resolveAccount(opts.account);
-  const gmail = await getGmailClient(resolved);
+  const resolved = gmailDeps.resolveAccount(opts.account);
+  const gmail = await gmailDeps.getGmailClient(resolved);
+  const from = await resolveSender(resolved, opts.from);
 
   const raw = buildRawMessage({
-    from: resolved.email,
+    from,
     to: opts.to,
     subject: opts.subject,
     body: opts.body,
@@ -622,15 +744,17 @@ export async function createDraft(opts: {
   subject: string;
   body: string;
   account?: string;
+  from?: string;
   cc?: string;
   bcc?: string;
   is_html?: boolean;
 }): Promise<DraftResult> {
-  const resolved = resolveAccount(opts.account);
-  const gmail = await getGmailClient(resolved);
+  const resolved = gmailDeps.resolveAccount(opts.account);
+  const gmail = await gmailDeps.getGmailClient(resolved);
+  const from = await resolveSender(resolved, opts.from);
 
   const raw = buildRawMessage({
-    from: resolved.email,
+    from,
     to: opts.to,
     subject: opts.subject,
     body: opts.body,
@@ -1031,13 +1155,15 @@ export async function replyToMessage(opts: {
   messageId: string;
   body: string;
   account?: string;
+  from?: string;
   is_html?: boolean;
   reply_all?: boolean;
   cc?: string;
   bcc?: string;
 }): Promise<SendResult> {
-  const resolved = resolveAccount(opts.account);
-  const gmail = await getGmailClient(resolved);
+  const resolved = gmailDeps.resolveAccount(opts.account);
+  const gmail = await gmailDeps.getGmailClient(resolved);
+  const from = await resolveSender(resolved, opts.from);
 
   // Fetch the original message to get threading headers
   const original = await withRetry(() =>
@@ -1075,6 +1201,10 @@ export async function replyToMessage(opts: {
   const ccParts: string[] = [];
   const seen = new Set<string>();
   seen.add(resolved.email.toLowerCase()); // exclude self
+  if (opts.from) {
+    const parsed = parseFromAddress(opts.from);
+    seen.add(parsed.email.toLowerCase());
+  }
 
   if (opts.reply_all) {
     for (const addr of [originalTo, originalCc].filter(Boolean).join(', ').split(',').map(a => a.trim()).filter(a => a.length > 0)) {
@@ -1104,7 +1234,7 @@ export async function replyToMessage(opts: {
     : originalMessageId;
 
   const raw = buildRawMessage({
-    from: resolved.email,
+    from,
     to,
     cc,
     bcc: opts.bcc,
@@ -1141,13 +1271,15 @@ export async function createDraftReply(opts: {
   messageId: string;
   body: string;
   account?: string;
+  from?: string;
   is_html?: boolean;
   reply_all?: boolean;
   cc?: string;
   bcc?: string;
 }): Promise<DraftResult> {
-  const resolved = resolveAccount(opts.account);
-  const gmail = await getGmailClient(resolved);
+  const resolved = gmailDeps.resolveAccount(opts.account);
+  const gmail = await gmailDeps.getGmailClient(resolved);
+  const from = await resolveSender(resolved, opts.from);
 
   // Fetch the original message to get threading headers
   const original = await withRetry(() =>
@@ -1181,6 +1313,10 @@ export async function createDraftReply(opts: {
   const ccParts: string[] = [];
   const seen = new Set<string>();
   seen.add(resolved.email.toLowerCase());
+  if (opts.from) {
+    const parsed = parseFromAddress(opts.from);
+    seen.add(parsed.email.toLowerCase());
+  }
 
   if (opts.reply_all) {
     for (const addr of [originalTo, originalCc].filter(Boolean).join(', ').split(',').map(a => a.trim()).filter(a => a.length > 0)) {
@@ -1209,7 +1345,7 @@ export async function createDraftReply(opts: {
     : originalMessageId;
 
   const raw = buildRawMessage({
-    from: resolved.email,
+    from,
     to,
     cc,
     bcc: opts.bcc,
