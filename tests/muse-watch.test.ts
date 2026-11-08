@@ -101,11 +101,11 @@ test('HOLDING includes reason after status, on same or next line, and only later
   h.set([ack, mail('done', ack.payload!.headers![0].value!, time('17:20'), { body: 'Status: DONE' })]);
   assert.equal((await h.run(time('17:25')))[0].color, 'green');
   assert.equal((await h.run(time('17:30'))).length, 0);
-  const same = await harness(t);
-  same.set([mail('same', '[Muse] Ack: Same', time('17:00'), { body: 'Received now Status: HOLDING Please confirm in this chat' })]);
+  const same = await harness(t, time('17:00'));
+  same.set([mail('same', '[Muse] Ack: Same', time('17:00'), { from: 'other@example.com', body: 'Received now Status: HOLDING Please confirm in this chat' })]);
   assert.match((await same.run(time('17:05')))[0].text, /Please confirm in this chat/);
   const long = await harness(t);
-  long.set([mail('long', '[Muse] Ack: Long', time('17:00'), { body: `Status: HOLDING ${'x'.repeat(240)}` })]);
+  long.set([mail('long', '[Muse] Ack: Long', time('17:00'), { from: 'other@example.com', body: `Status: HOLDING ${'x'.repeat(240)}` })]);
   assert.equal((await long.run(time('17:05')))[0].text.split('x'.repeat(200)).length, 2);
 });
 
@@ -115,7 +115,7 @@ test('first evaluation ignores old order deadlines; initially recovered late rep
   const statePath = join(directory, 'new-state.json');
   const h = await harness(t, time('17:00'));
   // Re-run with a missing state file, matching the production seed path.
-  h.set([mail('old-order', '[Muse] Old task', time('10:00'), { from: account, to: muse }),
+  h.set([mail('old-order', '[Muse] Old task', Date.parse('2026-11-07T18:00:00Z'), { from: account, to: muse }),
     mail('late-report', 'Muse Inflecto test late', time('19:00'))]);
   const seeded = await runMuseWatch({ gmail: h.gmail, post: async () => {}, statePath, now: time('20:30') });
   assert.ok(!seeded.some(n => n.key === 'order:old-order'));

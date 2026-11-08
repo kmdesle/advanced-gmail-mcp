@@ -80,7 +80,7 @@ export async function runMuseWatch(deps: {
   async function transition(key: string, failing: boolean, detail: string) {
     const previous = state.alerts[key];
     // Resolved keys are retained forever: an old slot/order never re-alerts.
-    if (failing ? previous !== undefined || (firstEvaluation && key.startsWith('slot:')) : !previous?.active) return;
+    if (failing ? previous !== undefined : !previous?.active) return;
     const color = failing ? 'amber' : 'green';
     const notice: Notice = { key, color, text: `${failing ? '🟡' : '🟢'} 🔮 INFLECTO · Muse ${failing ? detail : `recovered: ${previous!.detail}`} · ${key} → ${failing ? 'watch Muse mail' : 'no action'}` };
     notices.push(notice);
@@ -114,8 +114,14 @@ export async function runMuseWatch(deps: {
       if (slot + 2 * HOUR <= state.checkedThrough || slot + 2 * HOUR > now) continue;
       const key = `slot:${new Date(slot).toISOString()}`;
       const report = reports.find(m => m.time >= slot && m.time <= slot + 2 * HOUR);
-      if (!report) await transition(key, true, `REPORT MISSING after ${new Date(slot).toISOString()}`);
-      else if (state.alerts[key]?.active) await transition(key, false, state.alerts[key].detail);
+      if (!report && !(firstEvaluation && slot + 2 * HOUR < now)) await transition(key, true, `REPORT MISSING after ${new Date(slot).toISOString()}`);
+    }
+  }
+  if (!firstEvaluation) {
+    for (const [key, entry] of Object.entries(state.alerts)) {
+      if (key.startsWith('slot:') && entry.active && reports.some(m => m.time >= Date.parse(key.slice(5)))) {
+        await transition(key, false, entry.detail);
+      }
     }
   }
   const orders = mails.filter(m => [ACCOUNT, MUSE].includes(m.from) && m.to.includes(MUSE)
@@ -126,13 +132,13 @@ export async function runMuseWatch(deps: {
     const next = orders.filter(m => m.subject === order.subject && m.time > order.time).sort((a, b) => a.time - b.time)[0];
     const ack = acks.find(m => m.subject === `[Muse] Ack: ${order.subject}` && m.time >= order.time && (!next || m.time < next.time));
     const key = `order:${order.id}`;
-    if (!(firstEvaluation && now >= order.time + 24 * HOUR) && now >= order.time + HOUR / 4 && (!ack || ack.time > order.time + HOUR / 4)) {
+    if (!(firstEvaluation && order.time + 24 * HOUR <= now) && now >= order.time + HOUR / 4 && (!ack || ack.time > order.time + HOUR / 4)) {
       await transition(key, true, `ORDER UNACKED ${order.subject}`);
     }
     if (ack) await transition(key, false, order.subject);
   }
   for (const ack of acks) {
-    if (!/^\s*Status:\s*HOLDING\s*$/im.test(ack.body)) continue;
+    if (!/Status:\s*HOLDING\b/i.test(ack.body)) continue;
     const key = `holding:${ack.id}`;
     const holding = ack.body.match(/Status:\s*HOLDING\b([\s\S]*)/i)?.[1] ?? '';
     const reason = holding.replace(/^\s*Reason:\s*/i, '').trim().slice(0, 200) || 'reason not provided';
