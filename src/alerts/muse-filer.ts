@@ -97,7 +97,10 @@ function duplicateMatch(title: string, messageId: string, issues: Issue[], findi
     ].map(match => match[0]));
     const shared = tokens.filter(token => existingTokens.has(token)
       || phrases.has(token) && new RegExp(`(?<![\\p{L}\\p{N}_])${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}_])`, 'u').test(text));
-    const hasAnchor = shared.some(token => phrases.has(token) && token.length >= 12 || titleTools.has(token));
+    const hasAnchor = shared.some(token => phrases.has(token) && token.length >= 12
+      && token.includes(' ')
+      && !/^[a-z][a-z0-9]*(_[a-z0-9]+)+$/.test(token)
+      || titleTools.has(token));
     if (shared.length >= 2 && hasAnchor) return { issue, rule: 'distinctive_tokens', shared_tokens: shared };
   }
   for (const issue of issues) {
