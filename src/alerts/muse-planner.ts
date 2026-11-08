@@ -47,6 +47,7 @@ export interface CellLedgerEntry {
   last_run: string | null;
   last_pass: string | null;
   last_fail: string | null;
+  consecutive_blocked?: number;
   runs: number;
   issue_refs: string[];
 }
@@ -58,6 +59,8 @@ export interface Scoreboard {
   fails: number;
   blocked: number;
   never_run: number;
+  not_runnable?: number;
+  stuck_blocked?: number;
 }
 
 export interface PlannerState {
@@ -125,6 +128,36 @@ const DEFAULT_REPO = 'kmdesle/inflecto-ai';
 const DEFAULT_ACCOUNT = 'kevin@cyberwingman.ai';
 export const defaultStatePath = () => join(homedir(), '.local/state/muse-planner/ledger.json');
 
+export const RUNNER_CAPABILITIES = {
+  mcp: ['pro', 'premium'],
+  browser: ['free', 'pro', 'premium'],
+} as const;
+
+export function isCellRunnableByMuse(cell: MatrixCell): boolean {
+  const allowedTiers = RUNNER_CAPABILITIES[cell.surface as keyof typeof RUNNER_CAPABILITIES];
+  if (!allowedTiers) return false;
+  return (allowedTiers as readonly string[]).includes(cell.tier);
+}
+
+export function canSelectCell(cell: MatrixCell, entry: CellLedgerEntry | undefined, now: number): boolean {
+  if (!isCellRunnableByMuse(cell)) {
+    return false;
+  }
+  if (!entry) {
+    return true;
+  }
+  if ((entry.consecutive_blocked ?? 0) >= 3) {
+    return false;
+  }
+  if (entry.last_result === 'BLOCKED' && entry.last_run) {
+    const lastRunMs = Date.parse(entry.last_run);
+    if (!Number.isNaN(lastRunMs) && now - lastRunMs < 24 * 3600 * 1000) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function parseCoverageSection(body: string, validCellIds: Set<string>): CoverageRecord[] {
   const records: CoverageRecord[] = [];
   const lines = body.replace(/\r\n/g, '\n').split('\n');
@@ -168,6 +201,7 @@ export function applyCoverageRecord(
       last_run: null,
       last_pass: null,
       last_fail: null,
+      consecutive_blocked: 0,
       runs: 0,
       issue_refs: [],
     };
@@ -178,8 +212,12 @@ export function applyCoverageRecord(
   entry.last_result = record.result;
   if (record.result === 'PASS') {
     entry.last_pass = timeIso;
+    entry.consecutive_blocked = 0;
   } else if (record.result === 'FAIL') {
     entry.last_fail = timeIso;
+    entry.consecutive_blocked = 0;
+  } else if (record.result === 'BLOCKED') {
+    entry.consecutive_blocked = (entry.consecutive_blocked ?? 0) + 1;
   }
   if (record.issueRefs.length > 0) {
     entry.issue_refs = [...new Set([...entry.issue_refs, ...record.issueRefs])];
@@ -272,9 +310,17 @@ export function computeScoreboard(cells: MatrixCell[], ledger: Record<string, Ce
   let fails = 0;
   let blocked = 0;
   let neverRun = 0;
+  let notRunnable = 0;
+  let stuckBlocked = 0;
 
   for (const cell of cells) {
+    if (!isCellRunnableByMuse(cell)) {
+      notRunnable++;
+    }
     const entry = ledger[cell.id];
+    if (entry && (entry.consecutive_blocked ?? 0) >= 3) {
+      stuckBlocked++;
+    }
     if (!entry || entry.runs === 0 || !entry.last_run) {
       neverRun++;
     } else {
@@ -288,7 +334,16 @@ export function computeScoreboard(cells: MatrixCell[], ledger: Record<string, Ce
 
   const total = cells.length;
   const coverage_pct = total > 0 ? Number(((passed7d / total) * 100).toFixed(1)) : 0;
-  return { coverage_pct, passed_7d: passed7d, total, fails, blocked, never_run: neverRun };
+  return {
+    coverage_pct,
+    passed_7d: passed7d,
+    total,
+    fails,
+    blocked,
+    never_run: neverRun,
+    not_runnable: notRunnable,
+    stuck_blocked: stuckBlocked,
+  };
 }
 
 async function scanGmail(gmail: ReadonlyPlannerGmail, account: string): Promise<MuseMail[]> {
@@ -451,6 +506,7 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
   const retestCells: MatrixCell[] = [];
   for (const cell of matrix.cells) {
     const entry = state.cells[cell.id];
+    if (!canSelectCell(cell, entry, now)) continue;
     const lastRunMs = entry?.last_run ? Date.parse(entry.last_run) : null;
     const shouldRetest = cell.guards && cell.guards.some(guardNum => {
       const closedAt = closedMap.get(guardNum);
@@ -473,6 +529,8 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
   // (b) SMOKE (always present)
   const smokeCells: MatrixCell[] = [];
   for (const cell of matrix.cells) {
+    const entry = state.cells[cell.id];
+    if (!canSelectCell(cell, entry, now)) continue;
     if (cell.smoke && !chosenCellIds.has(cell.id)) {
       smokeCells.push(cell);
       chosenCellIds.add(cell.id);
@@ -489,6 +547,8 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
     // (d) daily FULL WALK: once per HST calendar day, at first run on/after 10:00 HST, include every browser cell
     if (canDailyWalk) {
       for (const cell of matrix.cells) {
+        const entry = state.cells[cell.id];
+        if (!canSelectCell(cell, entry, now)) continue;
         if (cell.surface === 'browser' && !chosenCellIds.has(cell.id)) {
           dailyWalkCells.push(cell);
           chosenCellIds.add(cell.id);
@@ -502,6 +562,8 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
     // (e) weekly cells on Sundays HST
     if (isSundayHst) {
       for (const cell of matrix.cells) {
+        const entry = state.cells[cell.id];
+        if (!canSelectCell(cell, entry, now)) continue;
         if (cell.weekly && !chosenCellIds.has(cell.id)) {
           if (usedMcpCalls + cell.est_mcp_calls <= maxMcpCalls) {
             if (cell.surface !== 'browser' || usedBrowserCells < maxBrowserCells || canDailyWalk) {
@@ -516,7 +578,7 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
     }
 
     // (c) FILL: cells never run first, then cells whose last_result is FAIL or BLOCKED, then stalest by last_run
-    const remaining = matrix.cells.filter(c => !chosenCellIds.has(c.id));
+    const remaining = matrix.cells.filter(c => !chosenCellIds.has(c.id) && canSelectCell(c, state.cells[c.id], now));
     remaining.sort((a, b) => {
       const aEntry = state.cells[a.id];
       const bEntry = state.cells[b.id];
@@ -562,7 +624,11 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
   // Scoreboard
   const scoreboard = computeScoreboard(matrix.cells, state.cells, now);
   state.scoreboard = scoreboard;
-  const scoreboard_line = `Scoreboard: coverage ${scoreboard.coverage_pct}% (${scoreboard.passed_7d}/${scoreboard.total}), fails: ${scoreboard.fails}, blocked: ${scoreboard.blocked}, never-run: ${scoreboard.never_run}`;
+  const notRunnableCount = scoreboard.not_runnable ?? 0;
+  const stuckBlockedCount = scoreboard.stuck_blocked ?? 0;
+  const notRunnablePart = notRunnableCount > 0 ? `, NOT RUNNABLE BY MUSE (covered elsewhere) ${notRunnableCount}` : '';
+  const stuckBlockedPart = stuckBlockedCount > 0 ? `, stuck-blocked ${stuckBlockedCount}` : '';
+  const scoreboard_line = `Scoreboard: coverage ${scoreboard.coverage_pct}% (${scoreboard.passed_7d}/${scoreboard.total}), fails: ${scoreboard.fails}, blocked: ${scoreboard.blocked}, never-run: ${scoreboard.never_run}${notRunnablePart}${stuckBlockedPart}`;
   console.log(scoreboard_line);
   deps.output?.({ type: 'scoreboard', ...scoreboard, scoreboard_line });
 
