@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { gmail_v1 } from 'googleapis';
-import { runMuseWatch, parseArgs, type Notice, type ReadonlyMuseGmail } from '../src/alerts/muse-watch.js';
+import { runMuseWatch, parseArgs, webhookPoster, type Notice, type ReadonlyMuseGmail } from '../src/alerts/muse-watch.js';
 import { parseWebhookConfig } from '../src/alerts/watcher.js';
 
 const account = 'kevin@cyberwingman.ai';
@@ -35,7 +35,7 @@ async function harness(t: Parameters<Parameters<typeof test>[1]>[0], checkedThro
       get: async params => { assert.equal(params.format, 'full'); return { data: messages.find(m => m.id === params.id)! }; },
     },
   } };
-  return { posted, statePath, set: (m: gmail_v1.Schema$Message[]) => { messages = m; }, fail: (value: boolean) => { failing = value; },
+  return { posted, statePath, gmail, set: (m: gmail_v1.Schema$Message[]) => { messages = m; }, fail: (value: boolean) => { failing = value; },
     run: (now: number, dryRun = false, post = async (n: Notice) => { posted.push(n); }) => runMuseWatch({ gmail, post, statePath, now, dryRun }) };
 }
 
@@ -90,7 +90,7 @@ test('old or unrelated acks cannot acknowledge a new order with the same subject
   assert.equal((await h.run(time('17:15')))[0].key, 'order:order');
 });
 
-test('HOLDING includes reason once and only a later explicit status recovers it', async t => {
+test('HOLDING includes reason after status, on same or next line, and only later status recovers it', async t => {
   const h = await harness(t);
   const ack = mail('hold', '[Muse] Ack: [Muse] Task', time('17:00'), { body: 'Status: HOLDING\nReason: browser unavailable' });
   h.set([ack]);
@@ -101,6 +101,43 @@ test('HOLDING includes reason once and only a later explicit status recovers it'
   h.set([ack, mail('done', ack.payload!.headers![0].value!, time('17:20'), { body: 'Status: DONE' })]);
   assert.equal((await h.run(time('17:25')))[0].color, 'green');
   assert.equal((await h.run(time('17:30'))).length, 0);
+  const same = await harness(t);
+  same.set([mail('same', '[Muse] Ack: Same', time('17:00'), { body: 'Received now Status: HOLDING Please confirm in this chat' })]);
+  assert.match((await same.run(time('17:05')))[0].text, /Please confirm in this chat/);
+  const long = await harness(t);
+  long.set([mail('long', '[Muse] Ack: Long', time('17:00'), { body: `Status: HOLDING ${'x'.repeat(240)}` })]);
+  assert.equal((await long.run(time('17:05')))[0].text.split('x'.repeat(200)).length, 2);
+});
+
+test('first evaluation ignores old order deadlines; initially recovered late reports do not alert', async t => {
+  const directory = await mkdtemp(join(homedir(), '.muse-watch-test-'));
+  t.after(() => rm(directory, { recursive: true }));
+  const statePath = join(directory, 'new-state.json');
+  const h = await harness(t, time('17:00'));
+  // Re-run with a missing state file, matching the production seed path.
+  h.set([mail('old-order', '[Muse] Old task', time('10:00'), { from: account, to: muse }),
+    mail('late-report', 'Muse Inflecto test late', time('19:00'))]);
+  const seeded = await runMuseWatch({ gmail: h.gmail, post: async () => {}, statePath, now: time('20:30') });
+  assert.ok(!seeded.some(n => n.key === 'order:old-order'));
+  assert.ok(!seeded.some(n => n.color === 'green'));
+  const active = await harness(t, time('17:00'));
+  active.set([mail('late-report', 'Muse Inflecto test late', time('19:00'))]);
+  const notices = await active.run(time('20:30'));
+  assert.ok(!notices.some(n => n.key === 'slot:2026-11-08T18:00:00.000Z'));
+});
+
+test('webhook routing drops green and amber when their own destination is absent', async () => {
+  const calls: string[] = [];
+  const logs: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async input => { calls.push(String(input)); return new Response('', { status: 200 }); };
+  try {
+    const post = webhookPoster({ SLACK_ALERTS_ACTION_WEBHOOK_URL: 'action' }, message => logs.push(message));
+    await post({ key: 'g', color: 'green', text: 'green' });
+    await post({ key: 'a', color: 'amber', text: 'amber' });
+    assert.deepEqual(calls, []);
+    assert.equal(logs.length, 2);
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test('unknown source never recovers existing failures; source amber and recovery each post once', async t => {
