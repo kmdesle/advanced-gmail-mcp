@@ -50,7 +50,7 @@ export function parseEmail(body: string): { findings: Finding[]; regressions: st
 }
 
 export function routeTitle(title: string): { repo: string; title: string } | undefined {
-  const match = title.match(/^\s*(Inflecto|Sendinel|Synchronex|Tractic|Cyber-Wingman|CW|Hashfolio|WFI|Hyperion|Wren|ACT-Now)\s*(?::|[-–—])\s*(\S[^\n]*)$/i);
+  const match = title.match(/^\s*(Inflecto|Sendinel|Synchronex|Tractic|Cyber-Wingman|CW|Hashfolio|WFI|Hyperion|Wren|ACT-Now)(?:\s*(?::|[-–—])\s*|\s+)(\S[^\n]*)$/i);
   if (!match) return undefined;
   return { repo: routes[match[1].toLowerCase()], title: `[muse] ${match[2].trim()}` };
 }
@@ -93,7 +93,7 @@ export interface Run {
   planned: { message_id: string; title: string; repo: string; body: string; labels: string[] }[];
   error?: string;
 }
-interface RepoState { issues: Issue[]; labels: string[] }
+interface RepoState { issues: Issue[]; recovery: Issue[]; labels: string[] }
 
 export async function runFiler(deps: {
   gmail: GmailClient; gh: Gh; apply?: boolean;
@@ -112,8 +112,10 @@ export async function runFiler(deps: {
       if (verified.nameWithOwner.toLowerCase() !== repo.toLowerCase()) throw new Error(`Repository route changed: ${repo}`);
       const labels: { name: string }[] = JSON.parse(await gh(['label', 'list', '--repo', repo, '--limit', '1000', '--json', 'name']));
       const issues: Issue[] = JSON.parse(await gh(['issue', 'list', '--repo', repo, '--label', 'muse-test', '--state', 'open', '--limit', '200', '--json', 'number,title,body,url']));
-      // Also recover a filing that has since been closed or lost its label. Read only.
-      state = { labels: labels.map(label => label.name), issues };
+      // REST pagination avoids search-index lag for footer recovery, including
+      // closed/unlabeled issues after an ambiguous create or Gmail-label failure.
+      const pages: Issue[][] = JSON.parse(await gh(['api', '--method', 'GET', `repos/${repo}/issues?state=all&per_page=100`, '--paginate', '--slurp']));
+      state = { labels: labels.map(label => label.name), issues, recovery: pages.flat() };
       repos.set(repo, state);
     }
     return state;
@@ -142,11 +144,10 @@ export async function runFiler(deps: {
         const route = routeTitle(finding.TITLE!);
         if (!route) { report({ ...base, action: 'unrouted' }); complete = false; continue; }
         const state = await repoState(route.repo);
-        const recovery: Issue[] = JSON.parse(await gh(['issue', 'list', '--repo', route.repo, '--state', 'all', '--search', `in:body "Filed from Muse email ${mail.id}"`, '--limit', '200', '--json', 'number,title,body,url']));
-        const exactRecovery = recovery.filter(issue => issue.body?.split('\n').includes(`Filed from Muse email ${mail.id}`));
+        const exactRecovery = state.recovery.filter(issue => issue.body?.split('\n').includes(`Filed from Muse email ${mail.id}`));
         const duplicate = findDuplicate(route.title, mail.id, state.issues)
           ?? exactRecovery.find(issue => normalizeTitle(route.title).sort().join(' ') === normalizeTitle(issue.title).sort().join(' '));
-        if (duplicate) { report({ ...base, action: 'duplicate', issue: duplicate.number }); continue; }
+        if (duplicate) { report({ ...base, action: 'duplicate', ...(duplicate.number ? { issue: duplicate.number } : { reason: 'Duplicates a finding already planned in this dry run' }) }); continue; }
         if (filed >= 10) { complete = false; run.skipped.push({ message_id: mail.id, reason: '10-issue cap reached' }); output({ ...base, deferred: '10-issue cap reached' }); continue; }
         const labels = ['muse-test', 'needs-spec'];
         // Only use an unambiguous, already-existing highest-priority label.

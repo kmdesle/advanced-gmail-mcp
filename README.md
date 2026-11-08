@@ -427,9 +427,9 @@ matches `P0`, `P1`, `priority: critical`, `priority: high`, `priority: highest`,
 
 Dedup compares normalized titles (lowercase, punctuation and leading `[muse]`
 removed) against up to 200 open `muse-test` issues, using token-Jaccard >= 0.7.
-The filer also searches all issue states for the message footer and matching
-title to recover partial runs even if a previously filed issue was closed or
-unlabeled. Duplicate issue numbers are reported. New issues are added to the
+The filer also reads all issue states through paginated `gh api` GET requests
+for the message footer and matching title to recover partial runs even if a
+previously filed issue was closed or unlabeled. This avoids search-index lag. Duplicate issue numbers are reported. New issues are added to the
 in-memory comparison set, preventing repeats within a run. At most 10 issues
 are created per run (or planned in dry-run); deferred findings leave the email
 pending. Run again to continue after a cap or failure.
@@ -449,9 +449,8 @@ messages, and a sanitized error on failure. Results use `filed`, `duplicate`,
 mistaken for completed filings. New state files/directories are private. Audit
 records contain test specifications; retention is operator managed. A local
 `run.lock` prevents overlapping processes using this state directory. After a
-hard kill, verify no filer is active before removing a stale lock. GitHub search
-indexing can lag, so inspect recent filings before retrying an ambiguous create
-failure. Cron and Monitor wiring are intentionally left to the coordinator.
+hard kill, verify no filer is active before removing a stale lock. Footer recovery reads the repository issue history once per run, which may be
+slow in very large repositories. Cron and Monitor wiring are left to the coordinator.
 
 `npm test` includes synthetic Muse fixtures with injected Gmail and `gh` clients;
 no network or real issue/label creation is used by those tests.

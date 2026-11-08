@@ -45,6 +45,7 @@ function harness(messages: Mail[], opts: { apply?: boolean; issues?: Issue[]; re
   let creates = 0;
   const gh: Gh = async args => {
     calls.push(args);
+    if (args[0] === 'api') return JSON.stringify([opts.recovery ?? []]);
     if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: args[2] });
     if (args[0] === 'label' && args[1] === 'list') return JSON.stringify((opts.labels ?? ['needs-spec', 'P0']).map(name => ({ name })));
     if (args[0] === 'label' && args[1] === 'create') return '';
@@ -81,6 +82,7 @@ test('six fixtures: parser preserves multiline fields, isolates regression verdi
 test('routing covers every product and alias, strips only the leading product', () => {
   const expected: Record<string, string> = { Inflecto: 'kmdesle/inflecto-ai', Sendinel: 'kmdesle/sendinel-ai', Synchronex: 'kmdesle/synchronex', Tractic: 'tractic-io/tractic-2.0', 'Cyber-Wingman': 'kmdesle/cyber-wingman', CW: 'kmdesle/cyber-wingman', Hashfolio: 'kmdesle/hashfolio', WFI: 'kmdesle/wfi-hyperion', Hyperion: 'kmdesle/wfi-hyperion', Wren: 'kmdesle/wren-app', 'ACT-Now': 'kmdesle/act-now' };
   for (const [prefix, repo] of Object.entries(expected)) assert.deepEqual(routeTitle(`${prefix.toUpperCase()}: Fix ${prefix}`), { repo, title: `[muse] Fix ${prefix}` });
+  assert.deepEqual(routeTitle('Inflecto Missing button'), { repo: 'kmdesle/inflecto-ai', title: '[muse] Missing button' });
   assert.equal(routeTitle('Other: Broken'), undefined);
   assert.equal(routeTitle('Wrenched: Broken'), undefined);
 });
@@ -120,7 +122,7 @@ test('apply files good findings, creates only muse-test, and marks completed ema
   const labels = h.calls.filter(args => args[0] === 'label' && args[1] === 'create');
   assert.ok(labels.every(args => args[2] === 'muse-test'));
   assert.equal(h.calls.filter(args => args[0] === 'issue' && args[1] === 'create').length, 2);
-  assert.ok(h.calls.every(args => ['view', 'list', 'create'].includes(args[1])));
+  assert.ok(h.calls.every(args => args[0] === 'api' || ['view', 'list', 'create'].includes(args[1])));
 });
 
 test('malformed findings and nothing found are handled; unknown prefix remains pending', async () => {
@@ -226,4 +228,16 @@ test('Gmail creates muse-filed only on explicit markFiled; adds no other labels'
   await client.markFiled('m2');
   assert.equal(calls.length, 3);
   assert.deepEqual(calls[0], { userId: 'me', requestBody: { name: 'muse-filed' } });
+});
+
+
+test('footer recovery requires matching message id and title; fuzzy closed issues do not block new findings', async () => {
+  const title = '[muse] Total shows wrong amount';
+  const h = harness([mail(duplicateTitle)], { apply: true, recovery: [
+    { number: 1, title, body: 'Filed from Muse email m10' },
+    { number: 2, title: '[muse] Total shows wrong amount again', body: 'Filed from Muse email m1' },
+  ] });
+  assert.equal((await h.run()).results[0].action, 'filed');
+  const recovered = harness([mail(duplicateTitle)], { apply: true, recovery: [{ number: 3, title, body: 'Filed from Muse email m1' }] });
+  assert.equal((await recovered.run()).results[0].issue, 3);
 });
