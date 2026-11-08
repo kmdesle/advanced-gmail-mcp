@@ -66,20 +66,21 @@ export async function runMuseWatch(deps: {
   const now = deps.now ?? Date.now();
   const file = deps.statePath ?? defaultStatePath();
   let state: State;
+  let firstEvaluation = false;
   try {
     state = JSON.parse(await readFile(file, 'utf8')) as State;
     if (state.version !== 1 || !Number.isFinite(state.checkedThrough) || !state.alerts || typeof state.alerts !== 'object'
       || Object.values(state.alerts).some(e => !e || typeof e.active !== 'boolean' || typeof e.detail !== 'string')) throw new Error('Invalid Muse watch state');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    firstEvaluation = true;
     state = { version: 1, checkedThrough: now - 24 * HOUR, alerts: {} };
   }
   const notices: Notice[] = [];
-  const initiallySeeded = state.checkedThrough === now - 24 * HOUR && Object.keys(state.alerts).length === 0;
   async function transition(key: string, failing: boolean, detail: string) {
     const previous = state.alerts[key];
     // Resolved keys are retained forever: an old slot/order never re-alerts.
-    if (failing ? previous !== undefined || (initiallySeeded && key.startsWith('slot:')) : !previous?.active) return;
+    if (failing ? previous !== undefined || (firstEvaluation && key.startsWith('slot:')) : !previous?.active) return;
     const color = failing ? 'amber' : 'green';
     const notice: Notice = { key, color, text: `${failing ? '🟡' : '🟢'} 🔮 INFLECTO · Muse ${failing ? detail : `recovered: ${previous!.detail}`} · ${key} → ${failing ? 'watch Muse mail' : 'no action'}` };
     notices.push(notice);
@@ -125,7 +126,7 @@ export async function runMuseWatch(deps: {
     const next = orders.filter(m => m.subject === order.subject && m.time > order.time).sort((a, b) => a.time - b.time)[0];
     const ack = acks.find(m => m.subject === `[Muse] Ack: ${order.subject}` && m.time >= order.time && (!next || m.time < next.time));
     const key = `order:${order.id}`;
-    if (!initiallySeeded && now >= order.time + HOUR / 4 && (!ack || ack.time > order.time + HOUR / 4)) {
+    if (!(firstEvaluation && now >= order.time + 24 * HOUR) && now >= order.time + HOUR / 4 && (!ack || ack.time > order.time + HOUR / 4)) {
       await transition(key, true, `ORDER UNACKED ${order.subject}`);
     }
     if (ack) await transition(key, false, order.subject);
