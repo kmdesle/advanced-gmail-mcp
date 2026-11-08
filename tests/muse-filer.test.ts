@@ -535,3 +535,77 @@ test('candidate reads paginate all-state lookback and open issues; unrelated iss
   const labeled = harness([mail(duplicateTitle)], { issues: [{ number: 2, title: 'Total shows wrong amount', labels: [{ name: 'muse-test' }] }] });
   assert.equal((await labeled.run()).results[0].action, 'duplicate');
 });
+
+test('subject fallback routes an unprefixed TITLE, unknown subject stays unrouted, prefixed TITLE wins', () => {
+  // subject fallback routes an unprefixed TITLE
+  assert.deepEqual(routeTitle('get_location_brief cannot geocode', '[Muse] Spec Inflecto 2026-11-08T20:50:02.318Z'), {
+    repo: 'kmdesle/inflecto-ai',
+    title: '[muse] get_location_brief cannot geocode',
+  });
+  // unknown-product subject stays unrouted
+  assert.equal(routeTitle('get_location_brief cannot geocode', '[Muse] Spec billing 2026-11-08'), undefined);
+  assert.equal(routeTitle('get_location_brief cannot geocode', '[Muse] Spec Unknown 2026-11-08'), undefined);
+  assert.equal(routeTitle('get_location_brief cannot geocode'), undefined);
+  // a prefixed TITLE still wins over the subject
+  assert.deepEqual(routeTitle('CW: Save button does nothing', '[Muse] Spec Inflecto 2026-11-08T20:50:02.318Z'), {
+    repo: 'kmdesle/cyber-wingman',
+    title: '[muse] Save button does nothing',
+  });
+});
+
+test('unprefixed TITLE falls back to subject product in runFiler, unknown stays unrouted, prefixed TITLE wins', async () => {
+  const unprefixedBody = 'TITLE: get_location_brief cannot geocode "1 World Trade Center, New York, NY"\nREPRO: Open search\nACTUAL: Geocode fails';
+  const prefixedBody = 'TITLE: CW: Save button does nothing\nREPRO: Open settings\nACTUAL: No response';
+
+  // Unprefixed routes with subject product
+  const h1 = harness([mail(unprefixedBody, 'm1', '[Muse] Spec Inflecto 2026-11-08T20:50:02.318Z')]);
+  const run1 = await h1.run();
+  assert.equal(run1.planned.length, 1);
+  assert.equal(run1.planned[0].repo, 'kmdesle/inflecto-ai');
+  assert.equal(run1.planned[0].title, '[muse] get_location_brief cannot geocode "1 World Trade Center, New York, NY"');
+
+  // Unknown subject product stays unrouted
+  const h2 = harness([mail(unprefixedBody, 'm2', '[Muse] Spec billing 2026-11-08')]);
+  const run2 = await h2.run();
+  assert.equal(run2.planned.length, 0);
+  assert.deepEqual(run2.results.map(r => r.action), ['unrouted']);
+
+  // Prefixed TITLE wins over subject
+  const h3 = harness([mail(prefixedBody, 'm3', '[Muse] Spec Inflecto 2026-11-08T20:50:02.318Z')]);
+  const run3 = await h3.run();
+  assert.equal(run3.planned.length, 1);
+  assert.equal(run3.planned[0].repo, 'kmdesle/cyber-wingman');
+  assert.equal(run3.planned[0].title, '[muse] Save button does nothing');
+});
+
+test('duplicate guard prevents refiling inflecto-ai #2334 and #2335', async () => {
+  const title1 = 'get_location_brief cannot geocode "1 World Trade Center, New York, NY" — cross-tool NY comparison impossible';
+  const title2 = 'Logged-in navigation bar has no dashboard link — still shows "Sign In" and "Start Free" (free and Pro)';
+  const body = `TITLE: ${title1}\nREPRO: 1. get_location_brief {"address": "1 World Trade Center, New York, NY"}\nACTUAL: get_location_brief cannot geocode\n\nTITLE: ${title2}\nREPRO: Sign in as free/Pro and look at top nav\nACTUAL: Nav still shows "Sign In" and "Start Free"`;
+
+  const existingIssues: Issue[] = [
+    {
+      number: 2334,
+      title: '[muse] get_location_brief cannot geocode "1 World Trade Center, New York, NY" and CBSA 35620 is missing from get_opportunities top 50',
+    },
+    {
+      number: 2335,
+      title: '[muse] logged-in nav still shows "Sign In" and "Start Free" for free and Pro; Dashboard link only in the footer',
+    },
+  ];
+
+  const h = harness([mail(body, '1a1bd3844e5b85ee', '[Muse] Spec Inflecto 2026-11-08T20:50:02.318Z')], {
+    issues: existingIssues,
+    apply: true,
+  });
+  const run = await h.run();
+
+  // Acceptance criterion 2: no duplicate of inflecto-ai #2334/#2335 would be filed
+  assert.equal(run.planned.length, 0);
+  assert.equal(h.calls.filter(args => args[0] === 'issue' && args[1] === 'create').length, 0);
+  assert.deepEqual(run.results.map(r => [r.action, r.issue]), [
+    ['duplicate', 2334],
+    ['duplicate', 2335],
+  ]);
+  assert.deepEqual(h.marked, ['1a1bd3844e5b85ee']);
+});

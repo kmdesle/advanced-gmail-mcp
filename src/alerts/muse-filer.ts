@@ -51,10 +51,16 @@ export function parseEmail(body: string): { findings: Finding[]; regressions: st
   return { findings, regressions, nothingFound: !findings.length && /\bnothing found\b/i.test(body) };
 }
 
-export function routeTitle(title: string): { repo: string; title: string } | undefined {
+export function routeTitle(title: string, subject?: string): { repo: string; title: string } | undefined {
   const match = title.match(/^\s*(Inflecto|Sendinel|Synchronex|Tractic|Cyber-Wingman|CW|Hashfolio|WFI|Hyperion|Wren|ACT-Now)(?:\s*(?::|[-–—])\s*|\s+)(\S[^\n]*)$/i);
-  if (!match) return undefined;
-  return { repo: routes[match[1].toLowerCase()], title: `[muse] ${match[2].trim()}` };
+  if (match) return { repo: routes[match[1].toLowerCase()], title: `[muse] ${match[2].trim()}` };
+  if (!subject) return undefined;
+  const subjectMatch = subject.match(/^\[Muse\] Spec\s+(Inflecto|Sendinel|Synchronex|Tractic|Cyber-Wingman|CW|Hashfolio|WFI|Hyperion|Wren|ACT-Now)\b/i);
+  if (!subjectMatch) return undefined;
+  const repo = routes[subjectMatch[1].toLowerCase()];
+  if (!repo) return undefined;
+  const clean = title.trim().replace(/^\[muse\]\s*/i, '');
+  return { repo, title: `[muse] ${clean}` };
 }
 
 export function normalizeTitle(title: string): string[] {
@@ -105,12 +111,17 @@ export function distinctiveMatch(title: string, finding: Finding, issues: Issue[
 }
 interface DuplicateMatch { issue: Issue; rule: 'title_jaccard' | 'email_footer'; shared_tokens: string[] }
 function duplicateMatch(title: string, messageId: string, issues: Issue[]): DuplicateMatch | undefined {
+  const normTitle = normalizeTitle(title);
   for (const issue of issues) {
-    if (normalizeTitle(title).sort().join(' ') === normalizeTitle(issue.title).sort().join(' ')
+    const normIssue = normalizeTitle(issue.title);
+    if (normTitle.sort().join(' ') === normIssue.sort().join(' ')
       && issue.body?.split('\n').includes(`Filed from Muse email ${messageId}`)) {
-      return { issue, rule: 'email_footer', shared_tokens: normalizeTitle(title) };
+      return { issue, rule: 'email_footer', shared_tokens: normTitle };
     }
-    if (jaccard(title, issue.title) >= 0.7) return { issue, rule: 'title_jaccard', shared_tokens: normalizeTitle(title).filter(token => normalizeTitle(issue.title).includes(token)) };
+    const shared = normTitle.filter(token => normIssue.includes(token));
+    if (jaccard(title, issue.title) >= 0.7 || (shared.length >= 7 && shared.length / Math.min(normTitle.length, normIssue.length) >= 0.7)) {
+      return { issue, rule: 'title_jaccard', shared_tokens: shared };
+    }
   }
   return undefined;
 }
@@ -215,7 +226,7 @@ export async function runFiler(deps: {
         if (missing.length || finding.TITLE?.includes('\n')) {
           report({ ...base, action: 'malformed', reason: missing.length ? `Missing ${missing.join(', ')}` : 'TITLE must be one line' }); continue;
         }
-        const route = routeTitle(finding.TITLE!);
+        const route = routeTitle(finding.TITLE!, mail.subject);
         if (!route) { report({ ...base, action: 'unrouted' }); complete = false; continue; }
         currentStep = 'repository state';
         const state = await repoState(route.repo);
