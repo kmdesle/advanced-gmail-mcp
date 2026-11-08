@@ -2,17 +2,18 @@
   "name": "gmail-mcp",
   "version": "1.0.0",
   "type": "module",
-  "description": "Gmail MCP server for Claude Code — multi-account email management",
+  "description": "Gmail MCP server for Claude Code \u2014 multi-account email management",
   "scripts": {
     "auth": "tsx src/auth.ts",
     "auth:check": "tsx src/auth.ts --check",
     "start": "tsx src/server.ts",
     "alerts": "tsx src/alerts.ts",
     "slack-alerts": "tsx src/slack-alerts.ts",
-    "test": "tsx --test tests/server.test.ts tests/calendar.test.ts tests/attachments.test.ts tests/alerts.test.ts tests/send-as.test.ts tests/slack-alerts.test.ts tests/muse-filer.test.ts",
+    "test": "tsx --test tests/server.test.ts tests/calendar.test.ts tests/attachments.test.ts tests/alerts.test.ts tests/send-as.test.ts tests/slack-alerts.test.ts tests/muse-filer.test.ts tests/muse-watch.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc",
-    "muse-filer": "tsx src/alerts/muse-filer.ts"
+    "muse-filer": "tsx src/alerts/muse-filer.ts",
+    "muse-watch": "tsx src/alerts/muse-watch.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
