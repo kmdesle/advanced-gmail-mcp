@@ -29,10 +29,10 @@ export interface ReadonlyGmail {
   };
 }
 
-function parseWebhookConfig(value: string): Record<string, string> {
+export function parseWebhookConfig(value: string): Record<string, string> {
   const result: Record<string, string> = {};
   for (const line of value.split(/\r?\n/)) {
-    const match = line.match(/^\s*(SLACK_ALERTS_ACTION_WEBHOOK_URL|SLACK_ALERTS_OK_WEBHOOK_URL)\s*=\s*(.*?)\s*$/);
+    const match = line.match(/^\s*(SLACK_ALERTS_ACTION_WEBHOOK_URL|SLACK_ALERTS_WATCH_WEBHOOK_URL|SLACK_ALERTS_OK_WEBHOOK_URL)\s*=\s*(.*?)\s*$/);
     if (match) result[match[1]] = match[2].replace(/^(?:'([\s\S]*)'|"([\s\S]*)")$/, '$1$2');
   }
   return result;

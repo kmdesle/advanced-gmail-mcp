@@ -474,3 +474,49 @@ slow in very large repositories. Cron and Monitor wiring are left to the coordin
 
 `npm test` includes synthetic Muse fixtures with injected Gmail and `gh` clients;
 no network or real issue/label creation is used by those tests.
+
+## Muse health watch
+
+`npm run muse-watch` checks `kevin@cyberwingman.ai` with the existing Gmail
+OAuth client, independently of coordinator sessions. Gmail operations are only
+label listing, message listing and message reading; it never sends email or
+changes Gmail labels. `npm run muse-watch -- --dry-run` prints proposed findings
+without posting to Slack or advancing alert state.
+
+The tester runs at 08:00, 11:00, 14:00 and 17:00 HST (18:00, 21:00, 00:00 and
+03:00 UTC). A slot missing an incoming subject starting `Muse Inflecto test` or
+`[Muse] Spec` within two hours raises amber once. A subsequent report recovers
+outstanding missing-report alerts. The first run checks the previous 24 hours;
+later runs catch up from the persisted timestamp, including after downtime.
+
+Orders from `kevin@cyberwingman.ai` or `kevin.m.desler@gmail.com` to Muse
+(`kevin.m.desler@gmail.com`, the existing filer identity) with a `[Muse]` subject
+prefix or a `Muse`/`[Muse]` label need an incoming `[Muse] Ack: <original subject>`
+within 15 minutes. Test, Spec and Ack subjects are excluded. An unacknowledged
+order raises amber once; a later matching Ack posts one green. If a late Ack
+is first observed after the deadline, both transitions are recorded that run. Matching uses
+the full original subject and arrival time, with repeated subjects bounded by
+the next order. Incoming Acks with `Status: HOLDING` raise amber once including
+the `Reason:` line; a newer Ack with the same subject and an explicit status
+other than HOLDING recovers it. Old unresolved orders and Acks have no age cutoff.
+
+State is stored atomically in `~/.local/state/muse-watch/state.json`. Alerted
+slot/order/Ack IDs remain recorded after recovery so they never re-fire.
+A `run.lock` prevents overlapping CLI runs; after a killed process, verify no
+watcher is running before removing a stale lock. A failed Gmail scan raises
+source-unknown amber and preserves existing failures; it never implies green.
+Slack posts use the existing `~/.config/desler/alerts.env` plumbing:
+`SLACK_ALERTS_WATCH_WEBHOOK_URL` routes 🟡 to `#fleet-amber-watch`, and
+`SLACK_ALERTS_OK_WEBHOOK_URL` routes 🟢 to `#fleet-green-ok`. If a color webhook
+is missing, the existing action webhook (`SLACK_ALERTS_ACTION_WEBHOOK_URL`,
+`#fleet-red-action`) is used with a logged fallback and the original circle.
+Missing configuration or failed posts do not mark that alert as delivered.
+
+Install in the server user's crontab to replace session-only coordinator crons:
+
+```cron
+17 * * * * cd ~/.claude/mcp-servers/gmail-mcp && HOME=$HOME npm run muse-watch
+```
+
+`npm test` includes injected read-only Gmail clients and fake Slack posters;
+tests do not send email or post to Slack.
