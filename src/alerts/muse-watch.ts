@@ -66,12 +66,14 @@ export async function runMuseWatch(deps: {
   const now = deps.now ?? Date.now();
   const file = deps.statePath ?? defaultStatePath();
   let state: State;
+  let firstEvaluation = false;
   try {
     state = JSON.parse(await readFile(file, 'utf8')) as State;
     if (state.version !== 1 || !Number.isFinite(state.checkedThrough) || !state.alerts || typeof state.alerts !== 'object'
       || Object.values(state.alerts).some(e => !e || typeof e.active !== 'boolean' || typeof e.detail !== 'string')) throw new Error('Invalid Muse watch state');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    firstEvaluation = true;
     state = { version: 1, checkedThrough: now - 24 * HOUR, alerts: {} };
   }
   const notices: Notice[] = [];
@@ -112,13 +114,14 @@ export async function runMuseWatch(deps: {
       if (slot + 2 * HOUR <= state.checkedThrough || slot + 2 * HOUR > now) continue;
       const key = `slot:${new Date(slot).toISOString()}`;
       const report = reports.find(m => m.time >= slot && m.time <= slot + 2 * HOUR);
-      if (!report) await transition(key, true, `REPORT MISSING after ${new Date(slot).toISOString()}`);
+      if (!report && !(firstEvaluation && slot + 2 * HOUR < now)) await transition(key, true, `REPORT MISSING after ${new Date(slot).toISOString()}`);
     }
   }
-  // A newly observed report restores report health, including previously missed slots.
-  for (const [key, entry] of Object.entries(state.alerts)) {
-    if (key.startsWith('slot:') && entry.active && reports.some(m => m.time >= Date.parse(key.slice(5)))) {
-      await transition(key, false, entry.detail);
+  if (!firstEvaluation) {
+    for (const [key, entry] of Object.entries(state.alerts)) {
+      if (key.startsWith('slot:') && entry.active && reports.some(m => m.time >= Date.parse(key.slice(5)))) {
+        await transition(key, false, entry.detail);
+      }
     }
   }
   const orders = mails.filter(m => [ACCOUNT, MUSE].includes(m.from) && m.to.includes(MUSE)
@@ -129,15 +132,16 @@ export async function runMuseWatch(deps: {
     const next = orders.filter(m => m.subject === order.subject && m.time > order.time).sort((a, b) => a.time - b.time)[0];
     const ack = acks.find(m => m.subject === `[Muse] Ack: ${order.subject}` && m.time >= order.time && (!next || m.time < next.time));
     const key = `order:${order.id}`;
-    if (now >= order.time + HOUR / 4 && (!ack || ack.time > order.time + HOUR / 4)) {
+    if (!(firstEvaluation && order.time + 24 * HOUR <= now) && now >= order.time + HOUR / 4 && (!ack || ack.time > order.time + HOUR / 4)) {
       await transition(key, true, `ORDER UNACKED ${order.subject}`);
     }
     if (ack) await transition(key, false, order.subject);
   }
   for (const ack of acks) {
-    if (!/^\s*Status:\s*HOLDING\s*$/im.test(ack.body)) continue;
+    if (!/Status:\s*HOLDING\b/i.test(ack.body)) continue;
     const key = `holding:${ack.id}`;
-    const reason = ack.body.match(/^\s*Reason:\s*(.+)$/im)?.[1]?.trim() ?? 'reason not provided';
+    const holding = ack.body.match(/Status:\s*HOLDING\b([\s\S]*)/i)?.[1] ?? '';
+    const reason = holding.replace(/^\s*Reason:\s*/i, '').trim().slice(0, 200) || 'reason not provided';
     const resolved = acks.some(m => m.subject === ack.subject && m.time > ack.time
       && /^\s*Status:\s*(?!HOLDING\b)\S+/im.test(m.body));
     if (resolved) await transition(key, false, ack.subject);
@@ -151,9 +155,11 @@ export async function runMuseWatch(deps: {
 export function webhookPoster(config: Record<string, string>, log = console.warn): Poster {
   return async notice => {
     const key = notice.color === 'amber' ? 'SLACK_ALERTS_WATCH_WEBHOOK_URL' : 'SLACK_ALERTS_OK_WEBHOOK_URL';
-    const url = config[key] || config.SLACK_ALERTS_ACTION_WEBHOOK_URL;
-    if (!url) throw new Error('Missing Slack webhook');
-    if (!config[key]) log(`Muse watch: ${key} unavailable; using existing action webhook fallback`);
+    const url = config[key];
+    if (!url) {
+      log(`Muse watch: ${key} unavailable; dropping ${notice.color} alert`);
+      return;
+    }
     const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text: notice.text }), signal: AbortSignal.timeout(10_000) });
     if (!response.ok) throw new Error('Slack post failed');
