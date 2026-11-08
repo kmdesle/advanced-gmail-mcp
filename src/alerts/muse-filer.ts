@@ -125,6 +125,13 @@ function duplicateMatch(title: string, messageId: string, issues: Issue[]): Dupl
   }
   return undefined;
 }
+export function parseAlreadyOpenIssues(finding: Finding): number[] {
+  const text = [finding.EVIDENCE, finding.ACTUAL, finding.REPRO].filter(Boolean).join('\n');
+  const matches = [...text.matchAll(/\balready\s+(?:open|opened|filed)\s+as\s+(#\d+(?:(?:\s*,\s*(?:(?:and\b|&)\s*)?|\s+(?:(?:and\b|&)\s*)?)#\d+)*)\b/gi)];
+  const cited = matches.flatMap(m => [...m[1].matchAll(/#(\d+)\b/g)].map(match => Number(match[1])));
+  return [...new Set(cited)];
+}
+
 export function findDuplicate(title: string, messageId: string, issues: Issue[]): Issue | undefined {
   return duplicateMatch(title, messageId, issues)?.issue;
 }
@@ -230,6 +237,17 @@ export async function runFiler(deps: {
         if (!route) { report({ ...base, action: 'unrouted' }); complete = false; continue; }
         currentStep = 'repository state';
         const state = await repoState(route.repo);
+        const alreadyOpen = parseAlreadyOpenIssues(finding);
+        const validAlreadyOpen = alreadyOpen.filter(num => state.issues.some(issue => issue.number === num));
+        if (validAlreadyOpen.length) {
+          report({
+            ...base,
+            action: 'duplicate',
+            issue: validAlreadyOpen[0],
+            ...(validAlreadyOpen.length > 1 ? { reason: validAlreadyOpen.map(n => `#${n}`).join(', ') } : {}),
+          });
+          continue;
+        }
         const exactRecovery = state.recovery.filter(issue => issue.body?.split('\n').includes(`Filed from Muse email ${mail.id}`));
         const duplicate = duplicateMatch(route.title, mail.id, state.issues)
           ?? duplicateMatch(route.title, mail.id, exactRecovery.filter(issue => normalizeTitle(route.title).sort().join(' ') === normalizeTitle(issue.title).sort().join(' ')));
