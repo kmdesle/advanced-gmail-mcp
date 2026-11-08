@@ -297,6 +297,7 @@ ${openIssuesList}`);
 
   sections.push(`## REPORT FORMAT
 one email titled '[Muse] Spec Inflecto ${opts.runId}' to kevin@cyberwingman.ai from the personal Gmail, FINDINGS in TITLE/REPRO/EXPECTED/ACTUAL/EVIDENCE/SEVERITY blocks (zero findings is fine: send the email anyway), then a COVERAGE section per matrix coverage_rule.
+Start every finding's TITLE line with "Inflecto: " (example: \`TITLE: Inflecto: get_location_brief cannot geocode ...\`).
 
 Coverage rule:
 ${opts.coverageRule}`);
