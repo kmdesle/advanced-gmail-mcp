@@ -329,7 +329,7 @@ const distinctivePairs = [
     shared: ['$5000', 'get_macro_trends'],
   },
   {
-    old: 'Muse: Richmond HPI 0.80% contradicts the source',
+    old: 'Muse: get_macro_trends - Richmond HPI YoY 0.80% does not match published FHFA',
     title: '"Richmond HPI" displays 0.80% — incorrect source period',
     actual: 'The displayed Richmond HPI is 0.80%.',
     shared: ['0.80%', 'richmond hpi'],
@@ -356,13 +356,13 @@ for (const [index, fixture] of distinctivePairs.entries()) {
 
 test('Rule B uses ACTUAL and issue body, normalizes quotes/dashes, and counts distinct whole tokens', async () => {
   const h = harness([mail('TITLE: Inflecto: A different headline\nREPRO: Inspect\nACTUAL: “Source–freshness” is 0.80% in get_macro_trends')], {
-    explain: true, issues: [{ number: 9, title: 'Muse: old audit', body: 'Source-freshness: 0.80% reported by GET_MACRO_TRENDS' }],
+    explain: true, issues: [{ number: 9, title: 'Muse: get_macro_trends old audit', body: 'Source-freshness: 0.80% reported by GET_MACRO_TRENDS' }],
   });
   const run = await h.run();
   assert.equal(run.results[0].rule, 'distinctive_tokens');
   assert.deepEqual(run.results[0].shared_tokens, ['0.80%', 'get_macro_trends', 'source-freshness']);
   assert.deepEqual(distinctiveTokens('79 79 “A claim” $5,000 0.80% get_macro_trends'),
-    ['$5000', '0.80%', '79', 'a claim', 'get_macro_trends']);
+    ['$5000', '0.80%', '79', 'get_macro_trends']);
   const distinct = harness([mail('TITLE: Inflecto: Missing rent data\nREPRO: Inspect\nACTUAL: 79 79 get_macro_trends')], {
     issues: [{ number: 10, title: 'Muse: unrelated audit', body: '179 markets in get_macro_trends' }],
   });
@@ -374,6 +374,7 @@ test('Rule B strips date parts and requires a phrase or tool anchor', async () =
   const second = 'Seen 2026-11-07 for 5 signals';
   assert.deepEqual(distinctiveTokens(first), ['200', '5', 'search_signals']);
   assert.deepEqual(distinctiveTokens(second), ['5']);
+  assert.deepEqual(distinctiveTokens('2026-11 2026 2025-12-31 99'), ['99']);
   const h = harness([mail(`TITLE: Inflecto: ${second}\nREPRO: Inspect\nACTUAL: ${second}`)], {
     issues: [{ number: 11, title: 'An unrelated run', body: first }],
   });
@@ -383,6 +384,39 @@ test('Rule B strips date parts and requires a phrase or tool anchor', async () =
     issues: [{ number: 12, title: 'Old result', body: '200 on 2026-11-07' }],
   });
   assert.equal((await numeric.run()).planned.length, 1);
+});
+
+test('Rule B rejects the three reported false pairs and keeps the title tool match', async () => {
+  const cases = [
+    {
+      title: 'get_opportunities ranks by a null column',
+      actual: 'Fields: cbsa_code, cbsa_name, median_rent, score, scoring_period',
+      issue: 'get_macro_trends - Richmond HPI YoY 0.80% does not match published FHFA',
+      body: 'cbsa_code cbsa_name median_rent score scoring_period',
+    },
+    {
+      title: 'get_location_brief returns no top signals for New York',
+      actual: 'Observed on 2026-11-08; result 11 of 2.',
+      issue: 'get_macro_trends - Richmond HPI YoY 0.80% does not match published FHFA',
+      body: 'Observed in 2026-11 after 11 of 2 checks.',
+    },
+    {
+      title: 'get_opportunities returns the same metro multiple times',
+      actual: 'The result is 3.55 across 50 rows.',
+      issue: 'Muse: home-page claim audit for pricing and performance',
+      body: 'get_opportunities reports 3.55 over 50 rows.',
+    },
+  ];
+  for (const pair of cases) {
+    const h = harness([mail(`TITLE: Inflecto: ${pair.title}\nREPRO: Inspect\nACTUAL: ${pair.actual}`)], {
+      issues: [{ number: 2278, title: pair.issue, body: pair.body }],
+    });
+    assert.equal((await h.run()).planned.length, 1, pair.title);
+  }
+
+  assert.equal(findDuplicate('get_macro_trends is missing HPI from Richmond "Richmond HPI YoY 0.80%"', 'm1', [
+    { number: 2278, title: 'get_macro_trends - Richmond HPI YoY 0.80% does not match published FHFA', body: 'The Richmond HPI value is 0.80%. "Richmond HPI YoY 0.80%"' },
+  ])?.number, 2278);
 });
 
 test('two clearly different findings in the same repo remain separate', async () => {
