@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   parseEmail, routeTitle, jaccard, findDuplicate, distinctiveMatch, issueBody, runFiler, parseArgs, gmailAdapter,
-  distinctiveTokens, type Gh, type GmailClient, type Mail, type Run, type Issue,
+  distinctiveTokens, parseAlreadyOpenIssues, type Gh, type GmailClient, type Mail, type Run, type Issue,
 } from '../src/alerts/muse-filer.js';
 
 // Synthetic fixtures; no real emails, accounts, credentials, or network.
@@ -608,4 +608,124 @@ test('duplicate guard prevents refiling inflecto-ai #2334 and #2335', async () =
     ['duplicate', 2335],
   ]);
   assert.deepEqual(h.marked, ['1a1bd3844e5b85ee']);
+});
+
+test('parseAlreadyOpenIssues parses single and multiple issue references case-insensitively', () => {
+  assert.deepEqual(parseAlreadyOpenIssues({ EVIDENCE: 'MCP response captured this run. Already open as #2286 — no new issue filed.' }), [2286]);
+  assert.deepEqual(parseAlreadyOpenIssues({ EVIDENCE: 'Desktop browser, 1920px, screenshots captured in-run. Already open as #2292 and #2293 — no new issue filed.' }), [2292, 2293]);
+  assert.deepEqual(parseAlreadyOpenIssues({ ACTUAL: 'Already open as #1, #2' }), [1, 2]);
+  assert.deepEqual(parseAlreadyOpenIssues({ REPRO: 'Already open as #1, #2 and #3' }), [1, 2, 3]);
+  assert.deepEqual(parseAlreadyOpenIssues({ EVIDENCE: 'already filed as #55' }), [55]);
+  assert.deepEqual(parseAlreadyOpenIssues({ EVIDENCE: 'already filed as #55 and #56' }), [55, 56]);
+  assert.deepEqual(parseAlreadyOpenIssues({ EVIDENCE: 'Already open as #9999' }), [9999]);
+  assert.deepEqual(parseAlreadyOpenIssues({ EVIDENCE: 'No mention here' }), []);
+});
+
+test('(a) finding with EVIDENCE "Already open as #2286" reports duplicate issue 2286 and files nothing', async () => {
+  const findingA = `TITLE: Inflecto: get_convergence_score still returns null convergence_narrative for New York (CBSA 35620)
+REPRO: 1. get_convergence_score {"cbsa_code": "35620"}
+ACTUAL: convergence_narrative is null
+EVIDENCE: MCP response captured this run. Already open as #2286 — no new issue filed.`;
+
+  const h = harness([mail(findingA, '1a1bd699b692f001', '[Muse] Spec Inflecto 2026-11-08T22:50:00Z')], {
+    issues: [{ number: 2286, title: '[muse] convergence_narrative is null for 6 of 8 metros checked' }],
+    apply: true,
+  });
+  const run = await h.run();
+
+  assert.equal(run.planned.length, 0);
+  assert.equal(h.calls.filter(args => args[0] === 'issue' && args[1] === 'create').length, 0);
+  assert.deepEqual(run.results.map(r => [r.action, r.issue]), [['duplicate', 2286]]);
+  assert.deepEqual(h.marked, ['1a1bd699b692f001']);
+});
+
+test('(b) finding with EVIDENCE "Already open as #2292 and #2293" reports duplicate issue 2292 (both recorded) and files nothing', async () => {
+  const findingB = `TITLE: Inflecto: /login and /login/team still show no plain-word validation error and offer two parallel paths
+REPRO: 1. Navigate to /login and /login/team
+ACTUAL: validation error missing; two parallel paths offered
+EVIDENCE: Desktop browser, 1920px, screenshots captured in-run. Already open as #2292 and #2293 — no new issue filed.`;
+
+  const h = harness([mail(findingB, '1a1bd699b692f001', '[Muse] Spec Inflecto 2026-11-08T22:50:00Z')], {
+    issues: [
+      { number: 2292, title: '[muse] /login shows no plain-word validation error' },
+      { number: 2293, title: '[muse] /login/team offers parallel paths' },
+    ],
+    apply: true,
+  });
+  const run = await h.run();
+
+  assert.equal(run.planned.length, 0);
+  assert.equal(h.calls.filter(args => args[0] === 'issue' && args[1] === 'create').length, 0);
+  assert.equal(run.results.length, 1);
+  assert.equal(run.results[0].action, 'duplicate');
+  assert.equal(run.results[0].issue, 2292);
+  assert.ok(run.results[0].reason?.includes('2292') && run.results[0].reason?.includes('2293'));
+  assert.equal(run.results[0].reason, '#2292, #2293');
+  assert.deepEqual(h.marked, ['1a1bd699b692f001']);
+});
+
+test('(c) "Already open as #9999" where #9999 is NOT in the issue list still files normally', async () => {
+  const findingC = `TITLE: Inflecto: Unfiled issue with unknown reference
+REPRO: 1. Trigger action
+ACTUAL: Failure observed
+EVIDENCE: MCP response captured this run. Already open as #9999 — no new issue filed.`;
+
+  const h = harness([mail(findingC, 'm-c', '[Muse] Spec Inflecto 2026-11-08T22:50:00Z')], {
+    issues: [{ number: 2286, title: '[muse] convergence_narrative is null for 6 of 8 metros checked' }],
+    apply: true,
+  });
+  const run = await h.run();
+
+  assert.equal(h.calls.filter(args => args[0] === 'issue' && args[1] === 'create').length, 1);
+  assert.equal(run.results.length, 1);
+  assert.equal(run.results[0].action, 'filed');
+});
+
+test('(d) finding without the phrase is unaffected', async () => {
+  const findingD = `TITLE: Inflecto: Standard new finding
+REPRO: 1. Normal steps
+ACTUAL: Error seen
+EVIDENCE: Captured screenshot without already open declaration`;
+
+  const h = harness([mail(findingD, 'm-d', '[Muse] Spec Inflecto 2026-11-08T22:50:00Z')], {
+    issues: [{ number: 2286, title: '[muse] convergence_narrative is null for 6 of 8 metros checked' }],
+    apply: true,
+  });
+  const run = await h.run();
+
+  assert.equal(h.calls.filter(args => args[0] === 'issue' && args[1] === 'create').length, 1);
+  assert.equal(run.results.length, 1);
+  assert.equal(run.results[0].action, 'filed');
+});
+
+test('message 1a1bd699b692f001 exact bodies with "Already open as" are reported as duplicate and never filed', async () => {
+  const body1 = `TITLE: Inflecto: get_convergence_score still returns null convergence_narrative for New York (CBSA 35620)
+REPRO: 1. get_convergence_score {"cbsa_code": "35620"}
+ACTUAL: convergence_narrative is null
+EVIDENCE: MCP response captured this run. Already open as #2286 — no new issue filed.`;
+
+  const body2 = `TITLE: Inflecto: /login and /login/team still show no plain-word validation error and offer two parallel paths
+REPRO: 1. Navigate to /login and /login/team
+ACTUAL: validation error missing; two parallel paths offered
+EVIDENCE: Desktop browser, 1920px, screenshots captured in-run. Already open as #2292 and #2293 — no new issue filed.`;
+
+  const body = `${body1}\n\n${body2}`;
+  const h = harness([mail(body, '1a1bd699b692f001', '[Muse] Spec Inflecto 2026-11-08T22:50:00Z')], {
+    issues: [
+      { number: 2286, title: '[muse] convergence_narrative is null for 6 of 8 metros checked' },
+      { number: 2292, title: '[muse] /login shows no plain-word validation error' },
+      { number: 2293, title: '[muse] /login/team offers parallel paths' },
+    ],
+    apply: true,
+  });
+  const run = await h.run();
+
+  assert.equal(run.planned.length, 0);
+  assert.equal(h.calls.filter(args => args[0] === 'issue' && args[1] === 'create').length, 0);
+  assert.deepEqual(run.results.map(r => [r.action, r.issue]), [
+    ['duplicate', 2286],
+    ['duplicate', 2292],
+  ]);
+  assert.equal(run.results[1].reason, '#2292, #2293');
+  assert.deepEqual(h.marked, ['1a1bd699b692f001']);
 });
