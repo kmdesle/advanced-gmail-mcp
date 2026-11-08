@@ -428,14 +428,28 @@ matches `P0`, `P1`, `priority: critical`, `priority: high`, `priority: highest`,
 `priority: P0`, `priority: P1`, or `priority-critical` / `priority-high`
 (space also accepted instead of the hyphen). Otherwise no priority is guessed.
 
-Dedup compares normalized titles (lowercase, punctuation and leading `[muse]`
-removed) against up to 200 open `muse-test` issues, using token-Jaccard >= 0.7.
-The filer also reads recently created or updated issues through paginated
-`gh api` GET requests for the message footer and matching title to recover
-partial runs even if a previously filed issue was closed or unlabeled. This
-avoids search-index lag. Recovery looks back 14 days; a crash gap longer than
-14 days is not covered. The `Filed from` footer check still runs against open
-`muse-test` issues. Duplicate issue numbers are reported. New issues are added to the
+Duplicate detection uses paginated GitHub REST reads: all `muse-test` issues
+updated within the 14-day lookback (state=all), plus all open `muse-test` issues
+and open issues whose titles start with `Muse:` or `[muse]`. There is no 200-issue
+limit. Pull requests are excluded. Matching is deterministic, without an LLM:
+
+- Rule B: extract distinctive tokens from TITLE + ACTUAL: double-quoted phrases,
+  numbers (including currency, units, percentages, and bare counts), and snake_case
+  tool names. Two distinct tokens shared with an issue's title + body mean a
+  duplicate. Case, Unicode quotes/dashes, and numeric thousands separators are
+  normalized; repeated occurrences count once and numbers match whole tokens.
+- Normalized title token-Jaccard >= 0.7 remains a duplicate. Exact normalized
+  titles with a matching `Filed from Muse email <message_id>` footer also recover
+  partial runs, including closed or unlabeled issues updated within 14 days.
+- Rule A: if no duplicate rule matches, a `#N` reference in any finding field to
+  an issue in the target repository that is open or closed within 14 days yields
+  `possible_duplicate`. Apply never files these findings and leaves their email
+  pending for review. Other repositories cannot resolve the reference.
+
+Add `--explain` to print the matching rule and shared tokens for each duplicate
+or possible duplicate, for example `npm run muse-filer -- --dry-run --explain`.
+Recovery uses REST to avoid search-index lag; crash gaps longer than 14 days
+are not covered. Duplicate issue numbers are reported. New issues are added to the
 in-memory comparison set, preventing repeats within a run. At most 10 issues
 are created per run (or planned in dry-run); deferred findings leave the email
 pending. Run again to continue after a cap or failure.
@@ -451,7 +465,7 @@ Each run appends one JSON line to `~/.local/state/muse-filer/runs.jsonl`, contai
 `ts`, `dry_run`, `results` (message ID, original title, action, and issue URL or
 number when applicable), `planned` previews, regression verdicts, deferred/skipped
 messages, and a sanitized error on failure. Results use `filed`, `duplicate`,
-`malformed`, or `unrouted`; dry-run proposals live in `planned` so they cannot be
+`possible_duplicate`, `malformed`, or `unrouted`; dry-run proposals live in `planned` so they cannot be
 mistaken for completed filings. New state files/directories are private. Audit
 records contain test specifications; retention is operator managed. A local
 `run.lock` prevents overlapping processes using this state directory. After a
