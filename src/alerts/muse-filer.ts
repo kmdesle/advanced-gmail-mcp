@@ -124,7 +124,7 @@ export async function runFiler(deps: {
       // REST pagination avoids search-index lag for footer recovery, including
       // closed/unlabeled issues after an ambiguous create or Gmail-label failure.
       const since = new Date(Date.now() - RECOVERY_LOOKBACK_MS).toISOString();
-      const ndjson = await callGh('gh api issues recovery', ['api', '--method', 'GET', `repos/${repo}/issues?state=all&since=${since}&per_page=100`, '--paginate', '--jq', '{number,title,body,url,pull_request:(.pull_request!=null)}']);
+      const ndjson = await callGh('gh api issues recovery', ['api', '--method', 'GET', `repos/${repo}/issues?state=all&since=${since}&per_page=100`, '--paginate', '--jq', '.[] | {number,title,body,url,pull_request:(.pull_request!=null)}']);
       const recovery = ndjson.split(/\r?\n/).filter(line => line.trim()).map(line => JSON.parse(line) as Issue & { pull_request?: boolean }).filter(issue => !issue.pull_request);
       state = { labels: labels.map(label => label.name), issues, recovery };
       repos.set(repo, state);
