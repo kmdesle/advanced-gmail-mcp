@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  parseEmail, routeTitle, jaccard, findDuplicate, issueBody, runFiler, parseArgs, gmailAdapter,
+  parseEmail, routeTitle, jaccard, findDuplicate, distinctiveMatch, issueBody, runFiler, parseArgs, gmailAdapter,
   distinctiveTokens, type Gh, type GmailClient, type Mail, type Run, type Issue,
 } from '../src/alerts/muse-filer.js';
 
@@ -346,11 +346,11 @@ for (const [index, fixture] of distinctivePairs.entries()) {
       ? { recovery: [{ ...issue, state: 'closed', closed_at: new Date().toISOString(), labels: [{ name: 'muse-test' }] }] }
       : { issues: [issue] }) });
     const run = await h.run();
-    assert.equal(run.planned.length, 0);
+    assert.equal(run.planned.length, 1);
     assert.deepEqual(run.results.map(result => [result.action, result.issue, result.rule, result.shared_tokens]),
-      [['duplicate', issue.number, 'distinctive_tokens', fixture.shared]]);
+      [['filed', issue.number, 'distinctive_tokens_related', fixture.shared]]);
     assert.ok(h.output.includes(run.results[0]));
-    assert.equal(h.calls.some(args => args[1] === 'create'), false);
+    assert.ok(run.planned[0].body.includes(`## POSSIBLY RELATED\n\n#${issue.number} (shares: ${fixture.shared.join(', ')})`));
   });
 }
 
@@ -359,7 +359,7 @@ test('Rule B uses ACTUAL and issue body, normalizes quotes/dashes, and counts di
     explain: true, issues: [{ number: 9, title: 'Muse: get_macro_trends old audit', body: 'Source-freshness: 0.80% reported by GET_MACRO_TRENDS' }],
   });
   const run = await h.run();
-  assert.equal(run.results[0].rule, 'distinctive_tokens');
+  assert.equal(run.results[0].rule, 'distinctive_tokens_related');
   assert.deepEqual(run.results[0].shared_tokens, ['0.80%', 'get_macro_trends', 'source-freshness']);
   assert.deepEqual(distinctiveTokens('79 79 “A claim” $5,000 0.80% get_macro_trends'),
     ['$5000', '0.80%', '79', 'get_macro_trends']);
@@ -414,9 +414,9 @@ test('Rule B rejects the three reported false pairs and keeps the title tool mat
     assert.equal((await h.run()).planned.length, 1, pair.title);
   }
 
-  assert.equal(findDuplicate('get_macro_trends is missing HPI from Richmond "Richmond HPI YoY 0.80%"', 'm1', [
+  assert.equal(distinctiveMatch('get_macro_trends is missing HPI from Richmond "Richmond HPI YoY 0.80%"', { TITLE: 'get_macro_trends is missing HPI from Richmond "Richmond HPI YoY 0.80%"' }, [
     { number: 2278, title: 'get_macro_trends - Richmond HPI YoY 0.80% does not match published FHFA', body: 'The Richmond HPI value is 0.80%. "Richmond HPI YoY 0.80%"' },
-  ])?.number, 2278);
+  ])?.issue.number, 2278);
 });
 
 test('Rule B does not anchor quoted JSON keys, while the Richmond HPI phrase still matches', async () => {
@@ -429,9 +429,9 @@ test('Rule B does not anchor quoted JSON keys, while the Richmond HPI phrase sti
   };
   const h = harness([mail(finding)], { issues: [issue] });
   assert.equal((await h.run()).planned.length, 1);
-  assert.equal(findDuplicate('get_macro_trends is missing HPI from Richmond "Richmond HPI YoY 0.80%"', 'm1', [
+  assert.equal(distinctiveMatch('get_macro_trends is missing HPI from Richmond "Richmond HPI YoY 0.80%"', { TITLE: 'get_macro_trends is missing HPI from Richmond "Richmond HPI YoY 0.80%"' }, [
     { number: 2278, title: issue.title, body: 'The Richmond HPI value is 0.80%. "Richmond HPI YoY 0.80%"' },
-  ])?.number, 2278);
+  ])?.issue.number, 2278);
 });
 
 test('Rule B requires the same prefixed tool in both titles', () => {
@@ -439,13 +439,13 @@ test('Rule B requires the same prefixed tool in both titles', () => {
   for (const issue of [
     { number: 2277, title: 'Muse: get_macro_trends - Chicago median_rent $5,000 is stale and unverified' },
     { number: 2278, title: 'get_macro_trends - Richmond HPI YoY 0.80% does not match published FHFA' },
-  ]) assert.notEqual(findDuplicate(finding, 'm1', [issue]), issue);
+  ]) assert.equal(distinctiveMatch(finding, { TITLE: finding }, [issue]), undefined);
 
-  assert.equal(findDuplicate('get_macro_trends is missing HPI and home prices: "Richmond HPI YoY 0.80%"', 'm1', [
+  assert.equal(distinctiveMatch('get_macro_trends is missing HPI and home prices: "Richmond HPI YoY 0.80%"', { TITLE: 'get_macro_trends is missing HPI and home prices: "Richmond HPI YoY 0.80%"' }, [
     { number: 2278, title: 'get_macro_trends - Richmond HPI YoY 0.80% does not match published FHFA', body: 'Richmond HPI is missing: 0.80% "Richmond HPI YoY 0.80%"' },
-  ])?.number, 2278);
+  ])?.issue.number, 2278);
 
-  assert.equal(findDuplicate('convergence_narrative is null for 6 of 8 metros', 'm1', [
+  assert.equal(distinctiveMatch('convergence_narrative is null for 6 of 8 metros', { TITLE: 'convergence_narrative is null for 6 of 8 metros' }, [
     { number: 2277, title: 'Muse: get_macro_trends - Chicago median_rent $5,000 is stale and unverified' },
     { number: 2278, title: 'get_macro_trends - Richmond HPI YoY 0.80% does not match published FHFA' },
   ]), undefined);
@@ -481,6 +481,32 @@ test('Rule A checks every field against same-repo open or recently closed issues
   }
 });
 
+test('Rule B files with POSSIBLY RELATED section and ignores in-run planned duplicates', async () => {
+  // Case (a): in-run get_opportunities finding must not be treated as related via Rule B
+  const findingA1 = 'TITLE: Inflecto: get_opportunities ranks by a null column\nREPRO: Inspect\nACTUAL: The result has 50 rows from get_opportunities.';
+  const findingA2 = 'TITLE: Inflecto: get_opportunities returns the same metro multiple times\nREPRO: Inspect\nACTUAL: The result is 3.55 across 50 rows from get_opportunities.';
+  const mailA = mail(`${findingA1}\n\n${findingA2}`);
+  const hA = harness([mailA], { explain: true });
+  const runA = await hA.run();
+  assert.equal(runA.planned.length, 2);
+  assert.ok(!runA.planned[1].body.includes('## POSSIBLY RELATED'));
+  assert.equal(runA.results.length, 0);
+
+  // Case (b): get_macro_trends finding pointing at #2278
+  const issue2278 = {
+    number: 2278,
+    title: 'get_macro_trends - Richmond HPI YoY 0.80% does not match published FHFA',
+    body: 'Richmond HPI 0.80% vs FHFA 1.83%',
+  };
+  const findingB = 'TITLE: Inflecto: get_macro_trends is missing HPI and home prices for the largest metros\nREPRO: Inspect\nACTUAL: Richmond HPI 0.80% from get_macro_trends';
+  const hB = harness([mail(findingB)], { explain: true, issues: [issue2278] });
+  const runB = await hB.run();
+  assert.equal(runB.planned.length, 1);
+  assert.ok(runB.planned[0].body.includes('## POSSIBLY RELATED\n\n#2278 (shares: 0.80%, get_macro_trends)'));
+  assert.deepEqual(runB.results.map(result => [result.action, result.issue, result.rule, result.shared_tokens]),
+    [['filed', 2278, 'distinctive_tokens_related', ['0.80%', 'get_macro_trends']]]);
+});
+
 test('Rule A excludes absent and long-closed issue numbers; Rule B wins over citations', async () => {
   const text = 'TITLE: Inflecto: Unrelated failure\nREPRO: See #42 and #99\nACTUAL: Unexpected blank screen';
   const h = harness([mail(text)], { recovery: [{ number: 42, title: 'Other work', state: 'closed', closed_at: '2000-01-01T00:00:00Z' }] });
@@ -489,7 +515,10 @@ test('Rule A excludes absent and long-closed issue numbers; Rule B wins over cit
   const duplicate = harness([mail(`TITLE: Inflecto: ${fixture.title}\nREPRO: See #42\nACTUAL: ${fixture.actual}`)], {
     issues: [{ number: 42, title: 'Other work' }, { number: 43, title: fixture.old }], explain: true,
   });
-  assert.deepEqual((await duplicate.run()).results.map(result => [result.action, result.issue, result.rule]), [['duplicate', 43, 'distinctive_tokens']]);
+  const run = await duplicate.run();
+  assert.equal(run.planned.length, 1);
+  assert.deepEqual(run.results.map(result => [result.action, result.issue, result.rule]), [['filed', 43, 'distinctive_tokens_related']]);
+  assert.ok(run.planned[0].body.includes(`## POSSIBLY RELATED\n\n#43 (shares: ${fixture.shared.join(', ')})`));
 });
 
 test('candidate reads paginate all-state lookback and open issues; unrelated issues are excluded', async () => {

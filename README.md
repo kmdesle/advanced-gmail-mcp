@@ -435,9 +435,13 @@ limit. Pull requests are excluded. Matching is deterministic, without an LLM:
 
 - Rule B: extract distinctive tokens from TITLE + ACTUAL: double-quoted phrases,
   numbers (including currency, units, percentages, and bare counts), and snake_case
-  tool names. Two distinct tokens shared with an issue's title + body mean a
-  duplicate. Case, Unicode quotes/dashes, and numeric thousands separators are
-  normalized; repeated occurrences count once and numbers match whole tokens.
+  tool names. Two distinct tokens shared with an existing repository issue's title +
+  body identify a possibly related issue, but Rule B matches never drop a finding.
+  Instead, the finding is filed normally with a trailing `## POSSIBLY RELATED\n\n#<N> (shares: <tokens>)`
+  section appended to the issue body so the triaging session decides. In `--explain` output,
+  this is reported as action `filed` with rule `distinctive_tokens_related` and the related issue number.
+  Rule B never compares a finding against other findings planned or filed in the same run;
+  in-run duplicates are detected only via the exact-title/Jaccard >= 0.7 rule.
 - Normalized title token-Jaccard >= 0.7 remains a duplicate. Exact normalized
   titles with a matching `Filed from Muse email <message_id>` footer also recover
   partial runs, including closed or unlabeled issues updated within 14 days.
@@ -446,8 +450,8 @@ limit. Pull requests are excluded. Matching is deterministic, without an LLM:
   `possible_duplicate`. Apply never files these findings and leaves their email
   pending for review. Other repositories cannot resolve the reference.
 
-Add `--explain` to print the matching rule and shared tokens for each duplicate
-or possible duplicate, for example `npm run muse-filer -- --dry-run --explain`.
+Add `--explain` to print the matching rule and shared tokens for each duplicate,
+related match, or possible duplicate, for example `npm run muse-filer -- --dry-run --explain`.
 Recovery uses REST to avoid search-index lag; crash gaps longer than 14 days
 are not covered. Duplicate issue numbers are reported. New issues are added to the
 in-memory comparison set, preventing repeats within a run. At most 10 issues
