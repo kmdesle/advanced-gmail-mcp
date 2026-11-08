@@ -45,14 +45,14 @@ function harness(messages: Mail[], opts: { apply?: boolean; issues?: Issue[]; re
   let creates = 0;
   const gh: Gh = async args => {
     calls.push(args);
-    if (args[0] === 'api') return JSON.stringify([opts.recovery ?? []]);
+    if (args[0] === 'api') return (opts.recovery ?? []).map(issue => JSON.stringify(issue)).join('\n');
     if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: args[2] });
     if (args[0] === 'label' && args[1] === 'list') return JSON.stringify((opts.labels ?? ['needs-spec', 'P0']).map(name => ({ name })));
     if (args[0] === 'label' && args[1] === 'create') return '';
     if (args[0] === 'issue' && args[1] === 'list') return JSON.stringify(args.includes('--search') ? opts.recovery ?? [] : issues);
     if (args[0] === 'issue' && args[1] === 'create') {
       creates++;
-      if (creates === opts.failCreate) throw new Error('provider secret must not appear');
+      if (creates === opts.failCreate) throw Object.assign(new Error('provider secret must not appear'), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' });
       const number = 100 + creates;
       issues.push({ number, title: args[args.indexOf('--title') + 1], body: args[args.indexOf('--body') + 1] });
       return `https://github.com/${args[args.indexOf('--repo') + 1]}/issues/${number}\n`;
@@ -112,6 +112,20 @@ test('dry run prints exact bodies and labels; makes no writes and records plans'
   assert.equal(parseArgs(['--apply']), true);
   assert.throws(() => parseArgs(['--apply', '--dry-run']));
   assert.throws(() => parseArgs(['--unknown']));
+  const recoveryCall = h.calls.find(args => args[0] === 'api')!;
+  assert.ok(recoveryCall.some(arg => arg.includes('since=')));
+  assert.ok(recoveryCall.includes('--paginate'));
+  assert.ok(recoveryCall.includes('--jq'));
+});
+
+test('recovery parses NDJSON objects and drops pull requests', async () => {
+  const h = harness([mail(duplicateTitle)], { recovery: [
+    { number: 42, title: '[muse] unrelated title' },
+    { number: 43, title: '[muse] Total shows wrong amount', pull_request: { url: 'private' } } as Issue,
+  ] });
+  const run = await h.run();
+  assert.equal(run.planned.length, 1);
+  assert.ok(h.calls.find(args => args[0] === 'api')?.some(arg => arg.includes('since=')));
 });
 
 test('apply files good findings, creates only muse-test, and marks completed email', async () => {
@@ -166,6 +180,8 @@ test('partial failure logs completed filing, retains email, and rerun recovers u
   assert.deepEqual(h.marked, []);
   assert.equal(h.records[0].results.length, 1);
   assert.doesNotMatch(JSON.stringify(h.records), /provider secret/);
+  assert.equal(h.records[0].failing_step, 'gh issue create');
+  assert.equal(h.records[0].error_code, 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER');
   // Simulate first issue closed or unlabeled before retry. Footer recovery is all-state.
   const retry = harness([mail(good)], { apply: true, recovery: [h.issues[0]] });
   assert.deepEqual((await retry.run()).results.map(result => result.action), ['duplicate', 'filed']);

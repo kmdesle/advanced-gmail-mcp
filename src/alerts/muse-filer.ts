@@ -8,6 +8,8 @@ import { pathToFileURL } from 'node:url';
 import type { gmail_v1 } from 'googleapis';
 
 const fields = ['TITLE', 'REPRO', 'EXPECTED', 'ACTUAL', 'EVIDENCE', 'SEVERITY'] as const;
+export const RECOVERY_LOOKBACK_DAYS = 14;
+const RECOVERY_LOOKBACK_MS = RECOVERY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
 type Field = typeof fields[number];
 export type Finding = Partial<Record<Field, string>>;
 export const routes: Record<string, string> = {
@@ -92,6 +94,8 @@ export interface Run {
   skipped: { message_id: string; reason: string }[];
   planned: { message_id: string; title: string; repo: string; body: string; labels: string[] }[];
   error?: string;
+  failing_step?: string;
+  error_code?: string;
 }
 interface RepoState { issues: Issue[]; recovery: Issue[]; labels: string[] }
 
@@ -105,17 +109,24 @@ export async function runFiler(deps: {
   const repos = new Map<string, RepoState>();
   let filed = 0;
   const gh = deps.gh;
+  let currentStep = 'Gmail message scan';
+  async function callGh(step: string, args: string[]): Promise<string> {
+    currentStep = step;
+    return gh(args);
+  }
   async function repoState(repo: string): Promise<RepoState> {
     let state = repos.get(repo);
     if (!state) {
-      const verified = JSON.parse(await gh(['repo', 'view', repo, '--json', 'nameWithOwner']));
+      const verified = JSON.parse(await callGh('gh repo view', ['repo', 'view', repo, '--json', 'nameWithOwner']));
       if (verified.nameWithOwner.toLowerCase() !== repo.toLowerCase()) throw new Error(`Repository route changed: ${repo}`);
-      const labels: { name: string }[] = JSON.parse(await gh(['label', 'list', '--repo', repo, '--limit', '1000', '--json', 'name']));
-      const issues: Issue[] = JSON.parse(await gh(['issue', 'list', '--repo', repo, '--label', 'muse-test', '--state', 'open', '--limit', '200', '--json', 'number,title,body,url']));
+      const labels: { name: string }[] = JSON.parse(await callGh('gh label list', ['label', 'list', '--repo', repo, '--limit', '1000', '--json', 'name']));
+      const issues: Issue[] = JSON.parse(await callGh('gh issue list', ['issue', 'list', '--repo', repo, '--label', 'muse-test', '--state', 'open', '--limit', '200', '--json', 'number,title,body,url']));
       // REST pagination avoids search-index lag for footer recovery, including
       // closed/unlabeled issues after an ambiguous create or Gmail-label failure.
-      const pages: Issue[][] = JSON.parse(await gh(['api', '--method', 'GET', `repos/${repo}/issues?state=all&per_page=100`, '--paginate', '--slurp']));
-      state = { labels: labels.map(label => label.name), issues, recovery: pages.flat() };
+      const since = new Date(Date.now() - RECOVERY_LOOKBACK_MS).toISOString();
+      const ndjson = await callGh('gh api issues recovery', ['api', '--method', 'GET', `repos/${repo}/issues?state=all&since=${since}&per_page=100`, '--paginate', '--jq', '{number,title,body,url,pull_request:(.pull_request!=null)}']);
+      const recovery = ndjson.split(/\r?\n/).filter(line => line.trim()).map(line => JSON.parse(line) as Issue & { pull_request?: boolean }).filter(issue => !issue.pull_request);
+      state = { labels: labels.map(label => label.name), issues, recovery };
       repos.set(repo, state);
     }
     return state;
@@ -148,6 +159,7 @@ export async function runFiler(deps: {
         }
         const route = routeTitle(finding.TITLE!);
         if (!route) { report({ ...base, action: 'unrouted' }); complete = false; continue; }
+        currentStep = 'repository state';
         const state = await repoState(route.repo);
         const exactRecovery = state.recovery.filter(issue => issue.body?.split('\n').includes(`Filed from Muse email ${mail.id}`));
         const duplicate = findDuplicate(route.title, mail.id, state.issues)
@@ -168,10 +180,10 @@ export async function runFiler(deps: {
         }
         if (!state.labels.includes('needs-spec')) throw new Error(`Missing existing needs-spec label in ${route.repo}`);
         if (!state.labels.includes('muse-test')) {
-          await gh(['label', 'create', 'muse-test', '--repo', route.repo, '--color', '7057ff', '--description', 'Findings from Muse structured test emails']);
+          await callGh('gh label create', ['label', 'create', 'muse-test', '--repo', route.repo, '--color', '7057ff', '--description', 'Findings from Muse structured test emails']);
           state.labels.push('muse-test');
         }
-        const url = (await gh(['issue', 'create', '--repo', route.repo, '--title', route.title, '--body', body, ...labels.flatMap(label => ['--label', label])])).trim();
+        const url = (await callGh('gh issue create', ['issue', 'create', '--repo', route.repo, '--title', route.title, '--body', body, ...labels.flatMap(label => ['--label', label])])).trim();
         filed++;
         const number = Number(url.match(/\/issues\/(\d+)$/)?.[1]);
         state.issues.push({ number, title: route.title, body, url });
@@ -183,6 +195,12 @@ export async function runFiler(deps: {
   } catch (error) {
     // Provider errors can contain credentials. Keep diagnostics local and bounded.
     run.error = 'Run failed; uncompleted emails remain pending. Check account access, repository access, and needs-spec labels.';
+    run.failing_step = currentStep;
+    const candidate = error as { code?: unknown; status?: unknown; name?: unknown };
+    if (typeof candidate?.code === 'string' && /^[A-Z0-9_]+$/.test(candidate.code)) run.error_code = candidate.code;
+    else if (typeof candidate?.code === 'number' && Number.isInteger(candidate.code)) run.error_code = `GH_EXIT_${candidate.code}`;
+    else if (typeof candidate?.status === 'number' && Number.isInteger(candidate.status)) run.error_code = `GH_EXIT_${candidate.status}`;
+    else if (typeof candidate?.name === 'string' && /^[A-Za-z][A-Za-z0-9]*Error$/.test(candidate.name)) run.error_code = candidate.name;
     output({ error: run.error });
     throw new Error(run.error);
   } finally {
@@ -261,7 +279,7 @@ async function main() {
     const exec = promisify(execFile);
     await runFiler({
       gmail: gmailAdapter(await getGmailClient('kevin.m.desler@gmail.com')), apply,
-      gh: async args => (await exec('gh', args, { maxBuffer: 16 * 1024 * 1024 })).stdout,
+      gh: async args => (await exec('gh', args, { maxBuffer: 64 * 1024 * 1024 })).stdout,
       output: value => console.log(JSON.stringify(value)),
       record: async run => { await appendFile(join(directory, 'runs.jsonl'), JSON.stringify(run) + '\n', { mode: 0o600 }); },
     });

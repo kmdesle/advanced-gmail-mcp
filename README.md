@@ -430,9 +430,12 @@ matches `P0`, `P1`, `priority: critical`, `priority: high`, `priority: highest`,
 
 Dedup compares normalized titles (lowercase, punctuation and leading `[muse]`
 removed) against up to 200 open `muse-test` issues, using token-Jaccard >= 0.7.
-The filer also reads all issue states through paginated `gh api` GET requests
-for the message footer and matching title to recover partial runs even if a
-previously filed issue was closed or unlabeled. This avoids search-index lag. Duplicate issue numbers are reported. New issues are added to the
+The filer also reads recently created or updated issues through paginated
+`gh api` GET requests for the message footer and matching title to recover
+partial runs even if a previously filed issue was closed or unlabeled. This
+avoids search-index lag. Recovery looks back 14 days; a crash gap longer than
+14 days is not covered. The `Filed from` footer check still runs against open
+`muse-test` issues. Duplicate issue numbers are reported. New issues are added to the
 in-memory comparison set, preventing repeats within a run. At most 10 issues
 are created per run (or planned in dry-run); deferred findings leave the email
 pending. Run again to continue after a cap or failure.
