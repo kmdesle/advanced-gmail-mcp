@@ -345,3 +345,113 @@ installed. Edit its paths, then copy it to `~/.config/systemd/user/` and run
 `systemctl --user enable --now slack-alerts.service`. Use one watcher per state
 directory. Follow the feed with the same Monitor `tail -F ... | jq` command as
 above, pointed at the Slack `alerts.jsonl`.
+
+## Muse email filer
+
+`npm run muse-filer` is a standalone, deterministic Gmail-to-GitHub filer for
+`kevin.m.desler@gmail.com`, resolved through the existing `accounts.json` and
+OAuth client. It selects subjects starting exactly with `[Muse] Spec` and skips
+messages already labeled `muse-filed`. Use the existing authenticated `gh` CLI.
+
+```bash
+npm run muse-filer                 # dry-run by default
+npm run muse-filer -- --dry-run     # explicit preview
+npm run muse-filer -- --apply       # create issues and mark completed emails
+```
+
+Dry-run prints the exact proposed repository, title, body, labels, and missing
+labels; it creates no GitHub issues or labels and applies no Gmail labels.
+It still writes the required local run audit and temporary process lock; existing
+OAuth loading may refresh its token normally. No LLM is used. Email text is
+parsed as data only and passed to `gh` as arguments without a shell. The filer
+never sends email or edits, closes, deletes, or comments on existing issues.
+
+Send an inline plain-text email in this exact format (repeat the six-field
+block for each finding):
+
+```text
+Subject: [Muse] Spec <task name> <date>
+
+TITLE: Inflecto: Total shows the wrong amount
+REPRO: Open billing
+Select the annual plan
+EXPECTED: Total is 120
+ACTUAL: Total is 12
+EVIDENCE: Tester screenshot URL or observation
+SEVERITY: wrong number
+
+TITLE: CW: Save button does nothing
+REPRO: Open settings and click Save
+EXPECTED: Settings persist
+ACTUAL: Nothing happens
+EVIDENCE: Tester observation
+SEVERITY: broken
+
+Regression verdicts:
+#123 PASS: Previously reported issue is fixed
+#456 FAIL: Previously reported issue still reproduces
+```
+
+Field names are uppercase and start their own lines. `TITLE` is one line; other
+fields continue until the next field name. `SEVERITY` is `wrong number`, `broken`,
+`confusing`, or `cosmetic`. A separate `Regression verdicts:` section contains
+one verdict per line with an existing `#issue` number; these lines are logged,
+never filed. For a clean test, use `Nothing found.` instead of finding blocks.
+Attachments and HTML-only messages are not parsed; send inline `text/plain`.
+
+Routes (verified with read-only `gh repo view` on November 8, 2026; checked again
+before each repository's first use in a run):
+
+| TITLE prefix | Repository |
+|---|---|
+| Inflecto | kmdesle/inflecto-ai |
+| Sendinel | kmdesle/sendinel-ai |
+| Synchronex | kmdesle/synchronex |
+| Tractic | tractic-io/tractic-2.0 |
+| Cyber-Wingman or CW | kmdesle/cyber-wingman |
+| Hashfolio | kmdesle/hashfolio |
+| WFI or Hyperion | kmdesle/wfi-hyperion |
+| Wren | kmdesle/wren-app |
+| ACT-Now | kmdesle/act-now |
+
+Prefix matching is case-insensitive. Issues are titled `[muse] <finding title>`
+with the leading product prefix removed. Bodies contain REPRO, EXPECTED, ACTUAL,
+EVIDENCE, and SEVERITY sections plus `Filed from Muse email <message_id>`.
+Apply creates only a missing `muse-test` label (purple, with a Muse description).
+The required `needs-spec` label must already exist; if missing, apply stops and
+leaves the email pending. Other labels are never created or changed. For
+`wrong number`, an existing priority label is added only when exactly one label
+matches `P0`, `P1`, `priority: critical`, `priority: high`, `priority: highest`,
+`priority: P0`, `priority: P1`, or `priority-critical` / `priority-high`
+(space also accepted instead of the hyphen). Otherwise no priority is guessed.
+
+Dedup compares normalized titles (lowercase, punctuation and leading `[muse]`
+removed) against up to 200 open `muse-test` issues, using token-Jaccard >= 0.7.
+The filer also searches all issue states for the message footer and matching
+title to recover partial runs even if a previously filed issue was closed or
+unlabeled. Duplicate issue numbers are reported. New issues are added to the
+in-memory comparison set, preventing repeats within a run. At most 10 issues
+are created per run (or planned in dry-run); deferred findings leave the email
+pending. Run again to continue after a cap or failure.
+
+Missing TITLE, REPRO, or ACTUAL, and multiline titles, are reported as malformed.
+Malformed findings count as handled so they do not retry forever. Unknown
+products are reported as unrouted and leave the email pending. Only emails whose
+findings were all filed, duplicated, or reported malformed are marked
+`muse-filed`; nothing-found and regression-only emails are marked as well. Apply
+creates the Gmail label lazily when first marking a completed email.
+
+Each run appends one JSON line to `~/.local/state/muse-filer/runs.jsonl`, containing
+`ts`, `dry_run`, `results` (message ID, original title, action, and issue URL or
+number when applicable), `planned` previews, regression verdicts, deferred/skipped
+messages, and a sanitized error on failure. Results use `filed`, `duplicate`,
+`malformed`, or `unrouted`; dry-run proposals live in `planned` so they cannot be
+mistaken for completed filings. New state files/directories are private. Audit
+records contain test specifications; retention is operator managed. A local
+`run.lock` prevents overlapping processes using this state directory. After a
+hard kill, verify no filer is active before removing a stale lock. GitHub search
+indexing can lag, so inspect recent filings before retrying an ambiguous create
+failure. Cron and Monitor wiring are intentionally left to the coordinator.
+
+`npm test` includes synthetic Muse fixtures with injected Gmail and `gh` clients;
+no network or real issue/label creation is used by those tests.

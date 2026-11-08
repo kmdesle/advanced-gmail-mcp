@@ -25,7 +25,7 @@ export function parseEmail(body: string): { findings: Finding[]; regressions: st
   let field: Field | undefined;
   let regressionSection = false;
   for (const line of body.replace(/\r\n/g, '\n').split('\n')) {
-    if (/^\s*(?:#{1,6}\s*)?regression(?:s| verdicts?| results?)?\s*:?\s*$/i.test(line)) {
+    if (/^\s*(?:#{1,6}\s*)?(?:\*\*)?regression(?:s| verdicts?| results?)?\s*:?\s*(?:\*\*)?\s*$/i.test(line)) {
       regressionSection = true;
       field = undefined;
       continue;
@@ -38,7 +38,7 @@ export function parseEmail(body: string): { findings: Finding[]; regressions: st
       if (!current) { current = {}; findings.push(current); }
       current[name] = match[2];
       field = name;
-    } else if ((regressionSection || /\bregression\b/i.test(line)) && /#\d+\b/.test(line)) {
+    } else if ((regressionSection || /\b(?:regression|pass|fail|fixed|still broken)\b/i.test(line)) && /#\d+\b/.test(line)) {
       regressions.push(line.trim());
       field = undefined;
     } else if (current && field) {
@@ -90,6 +90,7 @@ export interface Run {
   ts: string; dry_run: boolean; results: Result[];
   regressions: { message_id: string; verdict: string }[];
   skipped: { message_id: string; reason: string }[];
+  planned: { message_id: string; title: string; repo: string; body: string; labels: string[] }[];
   error?: string;
 }
 interface RepoState { issues: Issue[]; labels: string[] }
@@ -99,7 +100,7 @@ export async function runFiler(deps: {
   output?: (value: unknown) => void;
   record: (run: Run) => Promise<void>;
 }): Promise<Run> {
-  const run: Run = { ts: new Date().toISOString(), dry_run: !deps.apply, results: [], regressions: [], skipped: [] };
+  const run: Run = { ts: new Date().toISOString(), dry_run: !deps.apply, results: [], regressions: [], skipped: [], planned: [] };
   const output = deps.output ?? console.log;
   const repos = new Map<string, RepoState>();
   let filed = 0;
@@ -143,16 +144,18 @@ export async function runFiler(deps: {
         const state = await repoState(route.repo);
         const recovery: Issue[] = JSON.parse(await gh(['issue', 'list', '--repo', route.repo, '--state', 'all', '--search', `in:body "Filed from Muse email ${mail.id}"`, '--limit', '200', '--json', 'number,title,body,url']));
         const exactRecovery = recovery.filter(issue => issue.body?.split('\n').includes(`Filed from Muse email ${mail.id}`));
-        const duplicate = findDuplicate(route.title, mail.id, [...state.issues, ...exactRecovery]);
+        const duplicate = findDuplicate(route.title, mail.id, state.issues)
+          ?? exactRecovery.find(issue => normalizeTitle(route.title).sort().join(' ') === normalizeTitle(issue.title).sort().join(' '));
         if (duplicate) { report({ ...base, action: 'duplicate', issue: duplicate.number }); continue; }
         if (filed >= 10) { complete = false; run.skipped.push({ message_id: mail.id, reason: '10-issue cap reached' }); output({ ...base, deferred: '10-issue cap reached' }); continue; }
         const labels = ['muse-test', 'needs-spec'];
         // Only use an unambiguous, already-existing highest-priority label.
-        const priorities = state.labels.filter(label => /^(?:p0|priority:\s*(?:critical|highest|p0)|priority[- ]critical)$/i.test(label));
+        const priorities = state.labels.filter(label => /^(?:p[01]|priority:\s*(?:critical|high|highest|p[01])|priority[- ](?:critical|high))$/i.test(label));
         if (finding.SEVERITY?.toLowerCase() === 'wrong number' && priorities.length === 1) labels.push(priorities[0]);
         const body = issueBody(finding, mail.id);
         output({ would_file: { repo: route.repo, title: route.title, body, labels }, missing_labels: labels.filter(label => !state.labels.includes(label)) });
         if (!deps.apply) {
+          run.planned.push({ message_id: mail.id, title: route.title, repo: route.repo, body, labels });
           filed++;
           state.issues.push({ number: 0, title: route.title, body });
           continue;
