@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import {
   parseCoverageSection,
   normalizeBrief,
+  generateBriefText,
   computeScoreboard,
   runPlanner,
   parseArgs,
@@ -620,4 +621,74 @@ test('13. BLOCKED cells 24h throttle, FAIL re-queues immediately, stuck-blocked 
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
+});
+
+test('14. rendered brief pins exact TITLE-prefix instruction line and leaves remainder unchanged', () => {
+  const prefixLine = 'Start every finding\'s TITLE line with "Inflecto: " (example: `TITLE: Inflecto: get_location_brief cannot geocode ...`).';
+  const brief = generateBriefText({
+    runId: '2026-11-08T12:00:00.000Z',
+    mode: 'NORMAL',
+    openIssues: [{ number: 2300, state: 'OPEN', title: 'Inflecto: sample open issue' }],
+    retestCells: [],
+    smokeCells: [makeCell('smoke-1', { smoke: true })],
+    fillCells: [],
+    dailyWalkCells: [],
+    weeklyCells: [],
+    coverageRule: 'Every Muse report ends with a COVERAGE section: one line per cell attempted, in the form `<cell id> | PASS|FAIL|BLOCKED | <issue refs or ->`.',
+  });
+
+  const lines = brief.split('\n');
+  assert.equal(lines.includes(prefixLine), true, 'rendered brief must include exact TITLE-prefix instruction line');
+
+  const expectedFixtureWithoutLine = `# Muse Test Brief - 2026-11-08T12:00:00.000Z
+
+- **Run ID**: 2026-11-08T12:00:00.000Z
+- **Mode**: NORMAL
+- **Open muse-test issues**: 1
+
+## RETEST
+(none)
+
+## SMOKE
+
+### \`smoke-1\`
+- **Surface**: mcp
+- **Target**: target
+- **Tier**: pro
+- **Steps**:
+1. Step 1 for smoke-1
+- **Pass condition**: Pass condition for smoke-1
+
+## FILL
+(none)
+
+## DAILY-WALK
+(none)
+
+## WEEKLY
+(none)
+
+## EXPLORATORY
+EXPLORATORY: use judgment for up to 5 extra calls on whatever looks off in the areas above, stay inside the risk rules
+
+## RULES
+- password login at /login/team only
+- no forms that send email
+- never Create key
+- never checkout/Stripe/portal
+- no early-access form
+- quote visible strings exactly with a screenshot
+- desktop only (mobile is covered elsewhere)
+- do not re-report issues already open:
+  - #2300: Inflecto: sample open issue
+
+## REPORT FORMAT
+one email titled '[Muse] Spec Inflecto 2026-11-08T12:00:00.000Z' to kevin@cyberwingman.ai from the personal Gmail, FINDINGS in TITLE/REPRO/EXPECTED/ACTUAL/EVIDENCE/SEVERITY blocks (zero findings is fine: send the email anyway), then a COVERAGE section per matrix coverage_rule.
+
+Coverage rule:
+Every Muse report ends with a COVERAGE section: one line per cell attempted, in the form \`<cell id> | PASS|FAIL|BLOCKED | <issue refs or ->\`.
+`;
+
+  const briefWithoutPrefixLine = lines.filter(l => l !== prefixLine).join('\n');
+  assert.equal(briefWithoutPrefixLine, expectedFixtureWithoutLine);
 });
