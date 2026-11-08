@@ -369,11 +369,11 @@ test('Rule B uses ACTUAL and issue body, normalizes quotes/dashes, and counts di
   assert.equal((await distinct.run()).planned.length, 1);
 });
 
-test('Rule B ignores date parts and small counts without a phrase or tool anchor', async () => {
+test('Rule B strips date parts and requires a phrase or tool anchor', async () => {
   const first = 'Run 2026-11-07: search_signals returned 5 rows, 200 ok';
   const second = 'Seen 2026-11-07 for 5 signals';
-  assert.deepEqual(distinctiveTokens(first), ['200', 'search_signals']);
-  assert.deepEqual(distinctiveTokens(second), []);
+  assert.deepEqual(distinctiveTokens(first), ['200', '5', 'search_signals']);
+  assert.deepEqual(distinctiveTokens(second), ['5']);
   const h = harness([mail(`TITLE: Inflecto: ${second}\nREPRO: Inspect\nACTUAL: ${second}`)], {
     issues: [{ number: 11, title: 'An unrelated run', body: first }],
   });

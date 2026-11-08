@@ -78,14 +78,6 @@ export function distinctiveTokens(value: string): string[] {
   const text = normalizeText(value).replace(/\b\d{4}-\d{2}-\d{2}\b/g, ' ').replace(/\b\d{2}:\d{2}\b/g, ' ');
   const phrases = [...text.matchAll(/"([^"\n]+)"/g)].map(match => match[1].trim()).filter(Boolean);
   const numbers = [...text.matchAll(/(?<![\p{L}\p{N}_])(?:[$€£]\s*)?\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:%|percent\b|ms\b|kg\b|gb\b|mb\b|km\b|usd\b))?(?![\p{L}\p{N}_])/gu)]
-    .filter(match => {
-      const raw = match[0];
-      const digits = raw.replace(/\D/g, '');
-      const hasSuffix = /[$€£%]|\b(?:percent|ms|kg|gb|mb|km|usd)\b/i.test(raw);
-      const quoted = phrases.some(phrase => phrase.includes(raw.trim()))
-        || new RegExp(`(?:^|[^\\p{L}\\p{N}_])${raw.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}(?=$|[^\\p{L}\\p{N}_])`, 'u').test(text.slice(0, text.indexOf(raw)));
-      return quoted || hasSuffix || digits.length >= 3 && !/^(?:199\d|20\d\d)$/.test(digits);
-    })
     .map(match => match[0].replace(/,/g, '').replace(/\s+/g, ''));
   const tools = [...text.matchAll(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g)].map(match => match[0]);
   return [...new Set([...phrases, ...numbers, ...tools])].sort();
