@@ -75,8 +75,8 @@ function normalizeText(value: string): string {
     .replace(/[‘’]/g, "'").replace(/[‐‑‒–—−]/g, '-').replace(/\s+/g, ' ').trim();
 }
 export function distinctiveTokens(value: string): string[] {
-  const text = normalizeText(value).replace(/\b\d{4}-\d{2}-\d{2}\b/g, ' ').replace(/\b\d{2}:\d{2}\b/g, ' ');
-  const phrases = [...text.matchAll(/"([^"\n]+)"/g)].map(match => match[1].trim()).filter(Boolean);
+  const text = normalizeText(value).replace(/\b\d{4}-\d{2}(?:-\d{2})?\b/g, ' ').replace(/\b\d{4}\b/g, ' ').replace(/\b\d{2}:\d{2}\b/g, ' ');
+  const phrases = [...text.matchAll(/"([^"\n]+)"/g)].map(match => match[1].trim()).filter(phrase => phrase.length >= 12);
   const numbers = [...text.matchAll(/(?<![\p{L}\p{N}_])(?:[$€£]\s*)?\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:%|percent\b|ms\b|kg\b|gb\b|mb\b|km\b|usd\b))?(?![\p{L}\p{N}_])/gu)]
     .map(match => match[0].replace(/,/g, '').replace(/\s+/g, ''));
   const tools = [...text.matchAll(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g)].map(match => match[0]);
@@ -90,9 +90,14 @@ function duplicateMatch(title: string, messageId: string, issues: Issue[], findi
   for (const issue of issues) {
     const text = normalizeText(`${issue.title}\n${issue.body ?? ''}`);
     const existingTokens = new Set(distinctiveTokens(text));
+    const title = normalizeText(issue.title);
+    const titleTools = new Set([
+      ...title.matchAll(/\b(?:get|list|search|create|update|delete|submit|snooze|dismiss|mark)_[a-z0-9_]+\b/g),
+      ...title.matchAll(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g),
+    ].map(match => match[0]));
     const shared = tokens.filter(token => existingTokens.has(token)
       || phrases.has(token) && new RegExp(`(?<![\\p{L}\\p{N}_])${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}_])`, 'u').test(text));
-    const hasAnchor = shared.some(token => phrases.has(token) || /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/.test(token));
+    const hasAnchor = shared.some(token => phrases.has(token) && token.length >= 12 || titleTools.has(token));
     if (shared.length >= 2 && hasAnchor) return { issue, rule: 'distinctive_tokens', shared_tokens: shared };
   }
   for (const issue of issues) {
