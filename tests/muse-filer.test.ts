@@ -419,6 +419,21 @@ test('Rule B rejects the three reported false pairs and keeps the title tool mat
   ])?.number, 2278);
 });
 
+test('Rule B does not anchor quoted JSON keys, while the Richmond HPI phrase still matches', async () => {
+  const json = '{"cbsa_code": 16980, "cbsa_name": "Chicago", "median_rent": 5000, "scoring_period": "2026-11"}';
+  const finding = `TITLE: Inflecto: get_opportunities ranks by a null column\nREPRO: Inspect the result\nACTUAL: Returned ${json}`;
+  const issue = {
+    number: 2278,
+    title: 'Muse: get_macro_trends - Richmond HPI YoY 0.80% does not match published FHFA 1.83%',
+    body: `Observed payload ${json}`,
+  };
+  const h = harness([mail(finding)], { issues: [issue] });
+  assert.equal((await h.run()).planned.length, 1);
+  assert.equal(findDuplicate('get_macro_trends is missing HPI from Richmond "Richmond HPI YoY 0.80%"', 'm1', [
+    { number: 2278, title: issue.title, body: 'The Richmond HPI value is 0.80%. "Richmond HPI YoY 0.80%"' },
+  ])?.number, 2278);
+});
+
 test('two clearly different findings in the same repo remain separate', async () => {
   const body = 'TITLE: Inflecto: Export drops selected columns\nREPRO: Export CSV\nACTUAL: "Account name" column is absent\n\n'
     + 'TITLE: Inflecto: Map zoom freezes after navigation\nREPRO: Zoom the map\nACTUAL: Wheel input no longer responds';
