@@ -524,3 +524,66 @@ Install in the server user's crontab to replace session-only coordinator crons:
 
 `npm test` includes injected read-only Gmail clients and fake Slack posters;
 tests do not send email or post to Slack.
+
+## Muse test planner
+
+`npm run muse-planner` is a standalone, deterministic test coordinator for
+hourly Muse testing against `kmdesle/inflecto-ai`. Muse (an AI tester with a
+browser and the Inflecto MCP) reads ONE pinned GitHub issue each hour for its
+exact brief; this planner maintains a coverage ledger and rewrites that brief.
+
+```bash
+npm run muse-planner                 # dry-run by default
+npm run muse-planner -- --dry-run     # explicit preview
+npm run muse-planner -- --apply       # update target issue and persist ledger
+```
+
+### Inputs
+
+1. **Coverage matrix**: fetched from `kmdesle/inflecto-ai/contents/docs/qa/muse-coverage-matrix.json`
+   on `main` via `gh api`.
+2. **Gmail (`kevin@cyberwingman.ai`)**: read-only scan of emails from Muse whose
+   subject starts with `[Muse] Spec` or `Muse Inflecto test`. Parses the `COVERAGE`
+   section following a `COVERAGE` line, matching `<cell id> | PASS|FAIL|BLOCKED | <issue refs or ->`.
+   Unknown cell IDs and malformed lines are ignored. Processed message IDs are tracked in the
+   ledger so each email is applied once, in chronological date order.
+3. **GitHub issues**: open and closed issues labeled `muse-test` in `kmdesle/inflecto-ai`.
+
+### Ledger and Scoreboard
+
+State is stored in `~/.local/state/muse-planner/ledger.json` (`0o600` permissions),
+recording per cell `{last_result, last_run, last_pass, last_fail, runs, issue_refs}`
+alongside processed message IDs and daily walk date. Each run prints a one-line scoreboard:
+
+```text
+Scoreboard: coverage 25.0% (27/108), fails: 2, blocked: 1, never-run: 78
+```
+
+Coverage measures cells with a `last_pass` within the last 7 days over total cells.
+
+### Brief Generation and Scheduling
+
+Briefs are built in strict priority order within a budget of 35 estimated MCP calls
+and at most 2 browser cells per hourly run:
+
+- **RETEST**: cells whose `guards` list contains a CLOSED issue whose `last_run` is
+  older than the issue's `closedAt` (or never run).
+- **SMOKE**: cells with `smoke: true` are included every run.
+- **FILL**: fills remaining budget, prioritizing cells never run first, then cells
+  with `last_result` of `FAIL` or `BLOCKED`, then stalest by `last_run`.
+- **DAILY-WALK**: once per HST calendar day, at the first run on or after 10:00 HST,
+  includes every browser cell.
+- **WEEKLY**: on Sundays HST, includes cells marked `weekly: true`.
+
+If open `muse-test` issues exceed 15, the planner switches to `RETEST_ONLY` mode
+(only RETEST and SMOKE cells; no fill, daily walk, weekly, or exploratory hunting).
+Otherwise, ~20% of the MCP budget is left for exploratory testing.
+
+### Target Issue and Idempotency
+
+The planner finds the open issue in `kmdesle/inflecto-ai` with label `muse-brief`.
+In `--apply`, it creates the label and issue titled `Muse next-run brief (auto-generated, do not edit)`
+if missing. If the generated brief matches the existing body except for the UTC timestamp,
+the update is skipped idempotently. The planner never comments on or closes issues, never
+sends email, and never posts to Slack. `--dry-run` writes nothing to disk or GitHub.
+
