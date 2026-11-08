@@ -9,6 +9,7 @@ import {
   computeScoreboard,
   runPlanner,
   parseArgs,
+  RUNNER_CAPABILITIES,
   type Matrix,
   type MatrixCell,
   type GitHubIssue,
@@ -496,4 +497,127 @@ test('11. parseArgs and scoreboard calculations', () => {
   assert.equal(sb.fails, 1);
   assert.equal(sb.blocked, 1);
   assert.equal(sb.never_run, 1);
+});
+
+test('12. runner capabilities gating (free mcp never selected)', async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), 'planner-test-'));
+  const statePath = join(tmpDir, 'ledger.json');
+
+  try {
+    assert.deepEqual(RUNNER_CAPABILITIES.mcp, ['pro', 'premium']);
+    assert.deepEqual(RUNNER_CAPABILITIES.browser, ['free', 'pro', 'premium']);
+
+    const mcpFree = makeCell('mcp-free-1', { surface: 'mcp', tier: 'free', smoke: true, guards: [100] });
+    const mcpPro = makeCell('mcp-pro-1', { surface: 'mcp', tier: 'pro', smoke: true });
+    const browserFree = makeCell('browser-free-1', { surface: 'browser', tier: 'free' });
+    const matrix = makeMatrix([mcpFree, mcpPro, browserFree]);
+
+    const issues: GitHubIssue[] = [
+      { number: 100, state: 'CLOSED', closedAt: '2026-11-08T10:00:00Z', title: 'Issue 100' },
+    ];
+    const gmail = makeGmail([]);
+    const { gh } = makeGh({ matrix, issues });
+
+    const now = Date.parse('2026-11-08T12:00:00Z');
+    const res = await runPlanner({ gh, gmail, statePath, now });
+
+    // mcpFree should never be in brief, even though it is smoke and has a closed guard
+    assert.doesNotMatch(res.brief, /mcp-free-1/);
+    assert.match(res.brief, /mcp-pro-1/);
+    assert.match(res.brief, /browser-free-1/);
+
+    // Scoreboard should report NOT RUNNABLE BY MUSE
+    assert.equal(res.scoreboard.not_runnable, 1);
+    assert.match(res.scoreboard_line, /NOT RUNNABLE BY MUSE \(covered elsewhere\) 1/);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('13. BLOCKED cells 24h throttle, FAIL re-queues immediately, stuck-blocked drops after 3', async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), 'planner-test-'));
+  const statePath = join(tmpDir, 'ledger.json');
+
+  try {
+    const blockedCell = makeCell('blocked-cell', { surface: 'mcp', tier: 'pro' });
+    const failCell = makeCell('fail-cell', { surface: 'mcp', tier: 'pro' });
+    const matrix = makeMatrix([blockedCell, failCell]);
+
+    // Initial run: coverage mail reports blocked-cell BLOCKED and fail-cell FAIL at T0
+    const t0 = Date.parse('2026-11-08T10:00:00Z');
+    const mail1: MuseMail = {
+      id: 'm1',
+      subject: '[Muse] Spec Run 1',
+      time: t0,
+      body: 'COVERAGE\nblocked-cell | BLOCKED | quota\nfail-cell | FAIL | #200\n',
+    };
+
+    const gmail1 = makeGmail([mail1]);
+    const { gh: gh1 } = makeGh({ matrix });
+
+    // Run at T0 + 1 hour (11:00 UTC):
+    // - failCell should be re-queued immediately
+    // - blockedCell should be suppressed (< 24h)
+    const t1 = Date.parse('2026-11-08T11:00:00Z');
+    const res1 = await runPlanner({ gh: gh1, gmail: gmail1, statePath, apply: true, now: t1 });
+
+    assert.equal(res1.state.cells['blocked-cell'].consecutive_blocked, 1);
+    assert.equal(res1.state.cells['blocked-cell'].last_result, 'BLOCKED');
+    assert.equal(res1.state.cells['fail-cell'].last_result, 'FAIL');
+
+    assert.match(res1.brief, /fail-cell/);
+    assert.doesNotMatch(res1.brief, /blocked-cell/);
+    assert.doesNotMatch(res1.scoreboard_line, /stuck-blocked/);
+
+    // Run at T0 + 25 hours (next day 11:00 UTC):
+    // - blockedCell can be re-queued (> 24h since last_run)
+    const t2 = Date.parse('2026-11-09T11:00:00Z');
+    const { gh: gh2 } = makeGh({ matrix });
+    const res2 = await runPlanner({ gh: gh2, gmail: makeGmail([]), statePath, apply: true, now: t2 });
+
+    assert.match(res2.brief, /blocked-cell/);
+
+    // Now record 2nd and 3rd BLOCKED results for blockedCell
+    const mail2: MuseMail = {
+      id: 'm2',
+      subject: '[Muse] Spec Run 2',
+      time: t2,
+      body: 'COVERAGE\nblocked-cell | BLOCKED | quota\n',
+    };
+    const t3 = Date.parse('2026-11-10T12:00:00Z');
+    const mail3: MuseMail = {
+      id: 'm3',
+      subject: '[Muse] Spec Run 3',
+      time: t3,
+      body: 'COVERAGE\nblocked-cell | BLOCKED | quota\n',
+    };
+    const { gh: gh3 } = makeGh({ matrix });
+    const res3 = await runPlanner({ gh: gh3, gmail: makeGmail([mail2, mail3]), statePath, apply: true, now: t3 + 1000 });
+
+    assert.equal(res3.state.cells['blocked-cell'].consecutive_blocked, 3);
+    assert.equal(res3.scoreboard.stuck_blocked, 1);
+    assert.match(res3.scoreboard_line, /stuck-blocked 1/);
+
+    // Even after 48 hours, stuck-blocked cell must never be selected
+    const t4 = t3 + 48 * 3600 * 1000;
+    const { gh: gh4 } = makeGh({ matrix });
+    const res4 = await runPlanner({ gh: gh4, gmail: makeGmail([]), statePath, apply: true, now: t4 });
+
+    assert.doesNotMatch(res4.brief, /blocked-cell/);
+    assert.match(res4.scoreboard_line, /stuck-blocked 1/);
+
+    // If human resets or cell passes, consecutive_blocked resets
+    const mailReset: MuseMail = {
+      id: 'm4',
+      subject: '[Muse] Spec Run 4',
+      time: t4,
+      body: 'COVERAGE\nblocked-cell | PASS | -\n',
+    };
+    const { gh: gh5 } = makeGh({ matrix });
+    const res5 = await runPlanner({ gh: gh5, gmail: makeGmail([mailReset]), statePath, apply: true, now: t4 + 1000 });
+    assert.equal(res5.state.cells['blocked-cell'].consecutive_blocked, 0);
+    assert.doesNotMatch(res5.scoreboard_line, /stuck-blocked/);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
 });
