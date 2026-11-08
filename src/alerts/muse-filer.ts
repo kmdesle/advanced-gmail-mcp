@@ -82,8 +82,7 @@ export function distinctiveTokens(value: string): string[] {
   const tools = [...text.matchAll(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g)].map(match => match[0]);
   return [...new Set([...phrases, ...numbers, ...tools])].sort();
 }
-interface DuplicateMatch { issue: Issue; rule: 'title_jaccard' | 'email_footer' | 'distinctive_tokens'; shared_tokens: string[] }
-function duplicateMatch(title: string, messageId: string, issues: Issue[], finding: Finding): DuplicateMatch | undefined {
+export function distinctiveMatch(title: string, finding: Finding, issues: Issue[]): { issue: Issue; shared_tokens: string[] } | undefined {
   const source = normalizeText(`${finding.TITLE ?? title}\n${finding.ACTUAL ?? ''}`);
   const findingTitleTools = new Set([...normalizeText(finding.TITLE ?? title).matchAll(/\b(?:get|list|search|create|update|delete|submit|snooze|dismiss|mark)_[a-z0-9_]+\b/g)].map(match => match[0]));
   const phrases = new Set([...source.matchAll(/"([^"\n]+)"/g)].map(match => match[1].trim()).filter(Boolean));
@@ -91,8 +90,8 @@ function duplicateMatch(title: string, messageId: string, issues: Issue[], findi
   for (const issue of issues) {
     const text = normalizeText(`${issue.title}\n${issue.body ?? ''}`);
     const existingTokens = new Set(distinctiveTokens(text));
-    const title = normalizeText(issue.title);
-    const titleTools = new Set([...title.matchAll(/\b(?:get|list|search|create|update|delete|submit|snooze|dismiss|mark)_[a-z0-9_]+\b/g)]
+    const titleNorm = normalizeText(issue.title);
+    const titleTools = new Set([...titleNorm.matchAll(/\b(?:get|list|search|create|update|delete|submit|snooze|dismiss|mark)_[a-z0-9_]+\b/g)]
       .map(match => match[0]).filter(tool => findingTitleTools.has(tool)));
     const shared = tokens.filter(token => existingTokens.has(token)
       || phrases.has(token) && new RegExp(`(?<![\\p{L}\\p{N}_])${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}_])`, 'u').test(text));
@@ -100,8 +99,12 @@ function duplicateMatch(title: string, messageId: string, issues: Issue[], findi
       && token.includes(' ')
       && !/^[a-z][a-z0-9]*(_[a-z0-9]+)+$/.test(token)
       || titleTools.has(token));
-    if (shared.length >= 2 && hasAnchor) return { issue, rule: 'distinctive_tokens', shared_tokens: shared };
+    if (shared.length >= 2 && hasAnchor) return { issue, shared_tokens: shared };
   }
+  return undefined;
+}
+interface DuplicateMatch { issue: Issue; rule: 'title_jaccard' | 'email_footer'; shared_tokens: string[] }
+function duplicateMatch(title: string, messageId: string, issues: Issue[]): DuplicateMatch | undefined {
   for (const issue of issues) {
     if (normalizeTitle(title).sort().join(' ') === normalizeTitle(issue.title).sort().join(' ')
       && issue.body?.split('\n').includes(`Filed from Muse email ${messageId}`)) {
@@ -112,11 +115,15 @@ function duplicateMatch(title: string, messageId: string, issues: Issue[], findi
   return undefined;
 }
 export function findDuplicate(title: string, messageId: string, issues: Issue[]): Issue | undefined {
-  return duplicateMatch(title, messageId, issues, { TITLE: title })?.issue;
+  return duplicateMatch(title, messageId, issues)?.issue;
 }
-export function issueBody(finding: Finding, messageId: string): string {
-  return fields.filter(key => key !== 'TITLE').map(key => `## ${key}\n\n${finding[key] || '(not provided)'}`).join('\n\n')
+export function issueBody(finding: Finding, messageId: string, related?: { issue: Issue; shared_tokens: string[] }): string {
+  let body = fields.filter(key => key !== 'TITLE').map(key => `## ${key}\n\n${finding[key] || '(not provided)'}`).join('\n\n')
     + `\n\nFiled from Muse email ${messageId}`;
+  if (related) {
+    body += `\n\n## POSSIBLY RELATED\n\n#${related.issue.number} (shares: ${related.shared_tokens.join(', ')})`;
+  }
+  return body;
 }
 
 export type Gh = (args: string[]) => Promise<string>;
@@ -129,7 +136,7 @@ export interface Result {
   message_id: string; title: string;
   action: 'filed' | 'duplicate' | 'possible_duplicate' | 'malformed' | 'unrouted';
   issue?: string | number; reason?: string;
-  rule?: DuplicateMatch['rule'] | 'cited_issue'; shared_tokens?: string[];
+  rule?: DuplicateMatch['rule'] | 'distinctive_tokens_related' | 'cited_issue'; shared_tokens?: string[];
 }
 export interface Run {
   ts: string; dry_run: boolean; results: Result[];
@@ -213,13 +220,16 @@ export async function runFiler(deps: {
         currentStep = 'repository state';
         const state = await repoState(route.repo);
         const exactRecovery = state.recovery.filter(issue => issue.body?.split('\n').includes(`Filed from Muse email ${mail.id}`));
-        const duplicate = duplicateMatch(route.title, mail.id, state.issues, finding)
-          ?? duplicateMatch(route.title, mail.id, exactRecovery.filter(issue => normalizeTitle(route.title).sort().join(' ') === normalizeTitle(issue.title).sort().join(' ')), finding);
+        const duplicate = duplicateMatch(route.title, mail.id, state.issues)
+          ?? duplicateMatch(route.title, mail.id, exactRecovery.filter(issue => normalizeTitle(route.title).sort().join(' ') === normalizeTitle(issue.title).sort().join(' ')));
         if (duplicate) { report({ ...base, action: 'duplicate', ...(duplicate.issue.number ? { issue: duplicate.issue.number } : { reason: 'Duplicates a finding already planned in this dry run' }),
           ...(deps.explain ? { rule: duplicate.rule, shared_tokens: duplicate.shared_tokens } : {}) }); continue; }
+        // In-run plans use number 0 and are invisible to Rule B; Jaccard still sees them.
+        const related = distinctiveMatch(route.title, finding, state.issues.filter(issue => issue.number > 0));
         const cited = new Set(Object.values(finding).flatMap(value => [...value.matchAll(/#(\d+)\b/g)].map(match => Number(match[1]))));
         const possible = state.references.find(issue => cited.has(issue.number));
-        if (possible) {
+        // A citation stays non-filing only when Rule B did not already relate the finding.
+        if (!related && possible) {
           complete = false;
           report({ ...base, action: 'possible_duplicate', issue: possible.number,
             ...(deps.explain ? { rule: 'cited_issue' as const, shared_tokens: [`#${possible.number}`] } : {}) });
@@ -230,12 +240,14 @@ export async function runFiler(deps: {
         // Only use an unambiguous, already-existing highest-priority label.
         const priorities = state.labels.filter(label => /^(?:p[01]|priority:\s*(?:critical|high|highest|p[01])|priority[- ](?:critical|high))$/i.test(label));
         if (finding.SEVERITY?.toLowerCase() === 'wrong number' && priorities.length === 1) labels.push(priorities[0]);
-        const body = issueBody(finding, mail.id);
+        const body = issueBody(finding, mail.id, related);
         output({ would_file: { repo: route.repo, title: route.title, body, labels }, missing_labels: labels.filter(label => !state.labels.includes(label)) });
+        const explainRelated = deps.explain && related ? { rule: 'distinctive_tokens_related' as const, shared_tokens: related.shared_tokens } : {};
         if (!deps.apply) {
           run.planned.push({ message_id: mail.id, title: route.title, repo: route.repo, body, labels });
           filed++;
           state.issues.push({ number: 0, title: route.title, body });
+          if (deps.explain && related) report({ ...base, action: 'filed', issue: related.issue.number, ...explainRelated });
           continue;
         }
         if (!state.labels.includes('needs-spec')) throw new Error(`Missing existing needs-spec label in ${route.repo}`);
@@ -247,7 +259,7 @@ export async function runFiler(deps: {
         filed++;
         const number = Number(url.match(/\/issues\/(\d+)$/)?.[1]);
         state.issues.push({ number, title: route.title, body, url });
-        report({ ...base, action: 'filed', issue: url });
+        report({ ...base, action: 'filed', issue: deps.explain && related ? related.issue.number : url, ...explainRelated });
       }
       if (complete && deps.apply) await deps.gmail.markFiled(mail.id);
     }
