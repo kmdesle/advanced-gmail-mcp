@@ -369,6 +369,22 @@ test('Rule B uses ACTUAL and issue body, normalizes quotes/dashes, and counts di
   assert.equal((await distinct.run()).planned.length, 1);
 });
 
+test('Rule B ignores date parts and small counts without a phrase or tool anchor', async () => {
+  const first = 'Run 2026-11-07: search_signals returned 5 rows, 200 ok';
+  const second = 'Seen 2026-11-07 for 5 signals';
+  assert.deepEqual(distinctiveTokens(first), ['200', 'search_signals']);
+  assert.deepEqual(distinctiveTokens(second), []);
+  const h = harness([mail(`TITLE: Inflecto: ${second}\nREPRO: Inspect\nACTUAL: ${second}`)], {
+    issues: [{ number: 11, title: 'An unrelated run', body: first }],
+  });
+  assert.equal((await h.run()).planned.length, 1);
+
+  const numeric = harness([mail('TITLE: Inflecto: Result 200 in 2026-11-07\nREPRO: Inspect\nACTUAL: 200 from 2026-11-07')], {
+    issues: [{ number: 12, title: 'Old result', body: '200 on 2026-11-07' }],
+  });
+  assert.equal((await numeric.run()).planned.length, 1);
+});
+
 test('two clearly different findings in the same repo remain separate', async () => {
   const body = 'TITLE: Inflecto: Export drops selected columns\nREPRO: Export CSV\nACTUAL: "Account name" column is absent\n\n'
     + 'TITLE: Inflecto: Map zoom freezes after navigation\nREPRO: Zoom the map\nACTUAL: Wheel input no longer responds';
