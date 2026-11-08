@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   parseEmail, routeTitle, jaccard, findDuplicate, issueBody, runFiler, parseArgs, gmailAdapter,
-  type Gh, type GmailClient, type Mail, type Run, type Issue,
+  distinctiveTokens, type Gh, type GmailClient, type Mail, type Run, type Issue,
 } from '../src/alerts/muse-filer.js';
 
 // Synthetic fixtures; no real emails, accounts, credentials, or network.
@@ -36,7 +36,7 @@ const regressions = `${good}\n\nRegression verdicts:\n#123 PASS: previous save f
 const nothing = 'Nothing found.\nRegression verdicts:\n#789 PASS';
 const mail = (body: string, id = 'm1', subject = '[Muse] Spec billing 2026-11-08'): Mail => ({ id, body, subject });
 
-function harness(messages: Mail[], opts: { apply?: boolean; issues?: Issue[]; recovery?: Issue[]; labels?: string[]; failCreate?: number } = {}) {
+function harness(messages: Mail[], opts: { apply?: boolean; explain?: boolean; issues?: Issue[]; recovery?: Issue[]; labels?: string[]; failCreate?: number } = {}) {
   const calls: string[][] = [];
   const marked: string[] = [];
   const records: Run[] = [];
@@ -45,7 +45,7 @@ function harness(messages: Mail[], opts: { apply?: boolean; issues?: Issue[]; re
   let creates = 0;
   const gh: Gh = async args => {
     calls.push(args);
-    if (args[0] === 'api') return (opts.recovery ?? []).map(issue => JSON.stringify(issue)).join('\n');
+    if (args[0] === 'api') return (args.some(arg => arg.includes('?state=open&')) ? issues : opts.recovery ?? []).map(issue => JSON.stringify({ state: args.some(arg => arg.includes('?state=open&')) ? 'open' : 'closed', ...issue })).join('\n');
     if (args[0] === 'repo') return JSON.stringify({ nameWithOwner: args[2] });
     if (args[0] === 'label' && args[1] === 'list') return JSON.stringify((opts.labels ?? ['needs-spec', 'P0']).map(name => ({ name })));
     if (args[0] === 'label' && args[1] === 'create') return '';
@@ -61,7 +61,7 @@ function harness(messages: Mail[], opts: { apply?: boolean; issues?: Issue[]; re
   };
   const gmail: GmailClient = { async *messages() { yield* messages; }, async markFiled(id) { marked.push(id); } };
   return { calls, marked, records, output, issues, async run() {
-    return runFiler({ gmail, gh, apply: opts.apply, output: item => output.push(item), record: async run => { records.push(structuredClone(run)); } });
+    return runFiler({ gmail, gh, apply: opts.apply, explain: opts.explain, output: item => output.push(item), record: async run => { records.push(structuredClone(run)); } });
   } };
 }
 
@@ -305,4 +305,121 @@ test('issue references and verdict words inside a field remain finding data', ()
   assert.equal(parsed.findings[0].REPRO, 'Open settings\nFail as seen in #123');
   assert.equal(parsed.findings[0].EVIDENCE, 'Regression #456 still fails');
   assert.deepEqual(parsed.regressions, []);
+});
+
+// Hand-authored regression cases using the reported Muse claim/tool phrases.
+// These are not mailbox exports or snapshots of live GitHub issues.
+const distinctivePairs = [
+  {
+    old: 'Muse: claim audit - home - Ingest claims "26 Signal Streams" and "updated daily"',
+    title: '"Ingest 26 Signal Streams ... updated daily" contradicts stale sources',
+    actual: 'The home page promises “26 Signal Streams” and “updated daily” despite stale sources.',
+    shared: ['26', '26 signal streams', 'updated daily'],
+  },
+  {
+    old: 'Muse: claim audit - 79 ALERT markets versus 21 available markets',
+    title: '"79 ALERT markets" overstates the 21 markets returned',
+    actual: '79 advertised markets but only 21 available.',
+    shared: ['21', '79', '79 alert markets'],
+  },
+  {
+    old: 'Muse: get_macro_trends - Chicago median_rent $5,000 is stale and unverified',
+    title: 'get_macro_trends reports Chicago median rent $5,000 — stale and unverified vs Zillow $2,163',
+    actual: 'Chicago returned $5,000 from get_macro_trends.',
+    shared: ['$5000', 'get_macro_trends'],
+  },
+  {
+    old: 'Muse: Richmond HPI 0.80% contradicts the source',
+    title: '"Richmond HPI" displays 0.80% — incorrect source period',
+    actual: 'The displayed Richmond HPI is 0.80%.',
+    shared: ['0.80%', 'richmond hpi'],
+  },
+];
+
+for (const [index, fixture] of distinctivePairs.entries()) {
+  test(`Rule B reported phrase pair ${index + 1}: ${fixture.title}`, async () => {
+    const finding = `TITLE: Inflecto: ${fixture.title}\nREPRO: Inspect the reported claim\nACTUAL: ${fixture.actual}`;
+    const issue = { number: 2270 + index, title: fixture.old };
+    assert.ok(jaccard(`[muse] ${fixture.title}`, fixture.old) < 0.7);
+    // Exercise both closed labeled issues and older open Muse-style issues.
+    const h = harness([mail(finding)], { explain: true, ...(index % 2 === 0
+      ? { recovery: [{ ...issue, state: 'closed', closed_at: new Date().toISOString(), labels: [{ name: 'muse-test' }] }] }
+      : { issues: [issue] }) });
+    const run = await h.run();
+    assert.equal(run.planned.length, 0);
+    assert.deepEqual(run.results.map(result => [result.action, result.issue, result.rule, result.shared_tokens]),
+      [['duplicate', issue.number, 'distinctive_tokens', fixture.shared]]);
+    assert.ok(h.output.includes(run.results[0]));
+    assert.equal(h.calls.some(args => args[1] === 'create'), false);
+  });
+}
+
+test('Rule B uses ACTUAL and issue body, normalizes quotes/dashes, and counts distinct whole tokens', async () => {
+  const h = harness([mail('TITLE: Inflecto: A different headline\nREPRO: Inspect\nACTUAL: “Source–freshness” is 0.80% in get_macro_trends')], {
+    explain: true, issues: [{ number: 9, title: 'Muse: old audit', body: 'Source-freshness: 0.80% reported by GET_MACRO_TRENDS' }],
+  });
+  const run = await h.run();
+  assert.equal(run.results[0].rule, 'distinctive_tokens');
+  assert.deepEqual(run.results[0].shared_tokens, ['0.80%', 'get_macro_trends', 'source-freshness']);
+  assert.deepEqual(distinctiveTokens('79 79 “A claim” $5,000 0.80% get_macro_trends'),
+    ['$5000', '0.80%', '79', 'a claim', 'get_macro_trends']);
+  const distinct = harness([mail('TITLE: Inflecto: Missing rent data\nREPRO: Inspect\nACTUAL: 79 79 get_macro_trends')], {
+    issues: [{ number: 10, title: 'Muse: unrelated audit', body: '179 markets in get_macro_trends' }],
+  });
+  assert.equal((await distinct.run()).planned.length, 1);
+});
+
+test('two clearly different findings in the same repo remain separate', async () => {
+  const body = 'TITLE: Inflecto: Export drops selected columns\nREPRO: Export CSV\nACTUAL: "Account name" column is absent\n\n'
+    + 'TITLE: Inflecto: Map zoom freezes after navigation\nREPRO: Zoom the map\nACTUAL: Wheel input no longer responds';
+  const h = harness([mail(body)], { issues: [
+    { number: 8, title: 'Muse: get_macro_trends - Chicago median_rent $5,000 is stale and unverified' },
+  ] });
+  const run = await h.run();
+  assert.equal(run.planned.length, 2);
+  assert.equal(run.results.length, 0);
+});
+
+test('Rule A checks every field against same-repo open or recently closed issues and never files', async () => {
+  for (const field of ['TITLE', 'REPRO', 'EXPECTED', 'ACTUAL', 'EVIDENCE', 'SEVERITY']) {
+    for (const closed of [false, true]) {
+      const finding = { TITLE: 'Inflecto: New unrelated failure', REPRO: 'Inspect app', ACTUAL: 'Unexpected blank screen', [field]: `${field === 'TITLE' ? 'Inflecto: ' : ''}See #42` };
+      const issue = { number: 42, title: 'An unrelated issue', state: closed ? 'closed' : 'open', closed_at: new Date().toISOString() };
+      const h = harness([mail(Object.entries(finding).map(([key, value]) => `${key}: ${value}`).join('\n'))], {
+        apply: true, explain: true, ...(closed ? { recovery: [issue] } : { issues: [issue] }),
+      });
+      const run = await h.run();
+      assert.deepEqual(run.results.map(result => [result.action, result.issue, result.rule, result.shared_tokens]),
+        [['possible_duplicate', 42, 'cited_issue', ['#42']]]);
+      assert.deepEqual(h.marked, []);
+      assert.equal(run.planned.length, 0);
+      assert.equal(h.calls.some(args => args[1] === 'create'), false);
+      assert.ok(h.calls.filter(args => args[0] === 'api').every(args => args.some(arg => arg.startsWith('repos/kmdesle/inflecto-ai/issues?'))));
+    }
+  }
+});
+
+test('Rule A excludes absent and long-closed issue numbers; Rule B wins over citations', async () => {
+  const text = 'TITLE: Inflecto: Unrelated failure\nREPRO: See #42 and #99\nACTUAL: Unexpected blank screen';
+  const h = harness([mail(text)], { recovery: [{ number: 42, title: 'Other work', state: 'closed', closed_at: '2000-01-01T00:00:00Z' }] });
+  assert.equal((await h.run()).planned.length, 1);
+  const fixture = distinctivePairs[2];
+  const duplicate = harness([mail(`TITLE: Inflecto: ${fixture.title}\nREPRO: See #42\nACTUAL: ${fixture.actual}`)], {
+    issues: [{ number: 42, title: 'Other work' }, { number: 43, title: fixture.old }], explain: true,
+  });
+  assert.deepEqual((await duplicate.run()).results.map(result => [result.action, result.issue, result.rule]), [['duplicate', 43, 'distinctive_tokens']]);
+});
+
+test('candidate reads paginate all-state lookback and open issues; unrelated issues are excluded', async () => {
+  const h = harness([mail(duplicateTitle)], { issues: [{ number: 1, title: 'Total shows wrong amount' }] });
+  assert.equal((await h.run()).planned.length, 1);
+  const reads = h.calls.filter(args => args[0] === 'api');
+  assert.equal(reads.length, 2);
+  assert.ok(reads.every(args => args.includes('--paginate')));
+  assert.ok(reads[0].some(arg => /state=all&since=/.test(arg)));
+  assert.ok(reads[1].some(arg => /state=open&per_page=100/.test(arg)));
+  assert.equal(parseArgs(['--dry-run', '--explain']), false);
+  assert.equal(parseArgs(['--apply', '--explain']), true);
+  const labeled = harness([mail(duplicateTitle)], { issues: [{ number: 2, title: 'Total shows wrong amount', labels: [{ name: 'muse-test' }] }] });
+  assert.equal((await labeled.run()).results[0].action, 'duplicate');
 });

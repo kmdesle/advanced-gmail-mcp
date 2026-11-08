@@ -66,11 +66,45 @@ export function jaccard(a: string, b: string): number {
   const union = new Set([...left, ...right]);
   return union.size ? [...left].filter(token => right.has(token)).length / union.size : 0;
 }
-export interface Issue { number: number; title: string; body?: string; url?: string }
+export interface Issue {
+  number: number; title: string; body?: string; url?: string;
+  state?: string; closed_at?: string; labels?: { name: string }[];
+}
+function normalizeText(value: string): string {
+  return value.normalize('NFKC').toLowerCase().replace(/[“”„‟]/g, '"')
+    .replace(/[‘’]/g, "'").replace(/[‐‑‒–—−]/g, '-').replace(/\s+/g, ' ').trim();
+}
+export function distinctiveTokens(value: string): string[] {
+  const text = normalizeText(value);
+  const phrases = [...text.matchAll(/"([^"\n]+)"/g)].map(match => match[1].trim()).filter(Boolean);
+  const numbers = [...text.matchAll(/(?<![\p{L}\p{N}_])(?:[$€£]\s*)?\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:%|percent\b|ms\b|kg\b|gb\b|mb\b|km\b|usd\b))?(?![\p{L}\p{N}_])/gu)]
+    .map(match => match[0].replace(/,/g, '').replace(/\s+/g, ''));
+  const tools = [...text.matchAll(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g)].map(match => match[0]);
+  return [...new Set([...phrases, ...numbers, ...tools])].sort();
+}
+interface DuplicateMatch { issue: Issue; rule: 'title_jaccard' | 'email_footer' | 'distinctive_tokens'; shared_tokens: string[] }
+function duplicateMatch(title: string, messageId: string, issues: Issue[], finding: Finding): DuplicateMatch | undefined {
+  const source = normalizeText(`${finding.TITLE ?? title}\n${finding.ACTUAL ?? ''}`);
+  const phrases = new Set([...source.matchAll(/"([^"\n]+)"/g)].map(match => match[1].trim()).filter(Boolean));
+  const tokens = distinctiveTokens(source);
+  for (const issue of issues) {
+    const text = normalizeText(`${issue.title}\n${issue.body ?? ''}`);
+    const existingTokens = new Set(distinctiveTokens(text));
+    const shared = tokens.filter(token => existingTokens.has(token)
+      || phrases.has(token) && new RegExp(`(?<![\\p{L}\\p{N}_])${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}_])`, 'u').test(text));
+    if (shared.length >= 2) return { issue, rule: 'distinctive_tokens', shared_tokens: shared };
+  }
+  for (const issue of issues) {
+    if (normalizeTitle(title).sort().join(' ') === normalizeTitle(issue.title).sort().join(' ')
+      && issue.body?.split('\n').includes(`Filed from Muse email ${messageId}`)) {
+      return { issue, rule: 'email_footer', shared_tokens: normalizeTitle(title) };
+    }
+    if (jaccard(title, issue.title) >= 0.7) return { issue, rule: 'title_jaccard', shared_tokens: normalizeTitle(title).filter(token => normalizeTitle(issue.title).includes(token)) };
+  }
+  return undefined;
+}
 export function findDuplicate(title: string, messageId: string, issues: Issue[]): Issue | undefined {
-  return issues.find(issue => jaccard(title, issue.title) >= 0.7
-    || (normalizeTitle(title).sort().join(' ') === normalizeTitle(issue.title).sort().join(' ')
-      && issue.body?.split('\n').includes(`Filed from Muse email ${messageId}`)));
+  return duplicateMatch(title, messageId, issues, { TITLE: title })?.issue;
 }
 export function issueBody(finding: Finding, messageId: string): string {
   return fields.filter(key => key !== 'TITLE').map(key => `## ${key}\n\n${finding[key] || '(not provided)'}`).join('\n\n')
@@ -85,8 +119,9 @@ export interface GmailClient {
 }
 export interface Result {
   message_id: string; title: string;
-  action: 'filed' | 'duplicate' | 'malformed' | 'unrouted';
+  action: 'filed' | 'duplicate' | 'possible_duplicate' | 'malformed' | 'unrouted';
   issue?: string | number; reason?: string;
+  rule?: DuplicateMatch['rule'] | 'cited_issue'; shared_tokens?: string[];
 }
 export interface Run {
   ts: string; dry_run: boolean; results: Result[];
@@ -97,10 +132,10 @@ export interface Run {
   failing_step?: string;
   error_code?: string;
 }
-interface RepoState { issues: Issue[]; recovery: Issue[]; labels: string[] }
+interface RepoState { issues: Issue[]; recovery: Issue[]; references: Issue[]; labels: string[] }
 
 export async function runFiler(deps: {
-  gmail: GmailClient; gh: Gh; apply?: boolean;
+  gmail: GmailClient; gh: Gh; apply?: boolean; explain?: boolean;
   output?: (value: unknown) => void;
   record: (run: Run) => Promise<void>;
 }): Promise<Run> {
@@ -120,13 +155,21 @@ export async function runFiler(deps: {
       const verified = JSON.parse(await callGh('gh repo view', ['repo', 'view', repo, '--json', 'nameWithOwner']));
       if (verified.nameWithOwner.toLowerCase() !== repo.toLowerCase()) throw new Error(`Repository route changed: ${repo}`);
       const labels: { name: string }[] = JSON.parse(await callGh('gh label list', ['label', 'list', '--repo', repo, '--limit', '1000', '--json', 'name']));
-      const issues: Issue[] = JSON.parse(await callGh('gh issue list', ['issue', 'list', '--repo', repo, '--label', 'muse-test', '--state', 'open', '--limit', '200', '--json', 'number,title,body,url']));
       // REST pagination avoids search-index lag for footer recovery, including
       // closed/unlabeled issues after an ambiguous create or Gmail-label failure.
       const since = new Date(Date.now() - RECOVERY_LOOKBACK_MS).toISOString();
-      const ndjson = await callGh('gh api issues recovery', ['api', '--method', 'GET', `repos/${repo}/issues?state=all&since=${since}&per_page=100`, '--paginate', '--jq', '.[] | {number,title,body,url,pull_request:(.pull_request!=null)}']);
-      const recovery = ndjson.split(/\r?\n/).filter(line => line.trim()).map(line => JSON.parse(line) as Issue & { pull_request?: boolean }).filter(issue => !issue.pull_request);
-      state = { labels: labels.map(label => label.name), issues, recovery };
+      const projection = '.[] | {number,title,body,url: .html_url,state,closed_at,labels: [.labels[] | {name}],pull_request:(.pull_request!=null)}';
+      const decode = (ndjson: string) => ndjson.split(/\r?\n/).filter(line => line.trim())
+        .map(line => JSON.parse(line) as Issue & { pull_request?: boolean }).filter(issue => !issue.pull_request);
+      const recovery = decode(await callGh('gh api issues recovery', ['api', '--method', 'GET', `repos/${repo}/issues?state=all&since=${since}&per_page=100`, '--paginate', '--jq', projection]));
+      const openIssues = decode(await callGh('gh api open issues', ['api', '--method', 'GET', `repos/${repo}/issues?state=open&per_page=100`, '--paginate', '--jq', projection]));
+      const candidates = [...openIssues, ...recovery];
+      const issues = [...new Map(candidates.filter(issue => issue.labels?.some(label => label.name === 'muse-test')
+        || (issue.state === 'open' || openIssues.some(open => open.number === issue.number)) && /^\s*(?:Muse:|\[muse\])/i.test(issue.title))
+        .map(issue => [issue.number, issue])).values()];
+      // All open issues and recently closed issues can resolve Rule A references.
+      const references = [...new Map([...openIssues, ...recovery.filter(issue => issue.state === 'open' || issue.closed_at && issue.closed_at >= since)].map(issue => [issue.number, issue])).values()];
+      state = { labels: labels.map(label => label.name), issues, recovery, references };
       repos.set(repo, state);
     }
     return state;
@@ -162,9 +205,18 @@ export async function runFiler(deps: {
         currentStep = 'repository state';
         const state = await repoState(route.repo);
         const exactRecovery = state.recovery.filter(issue => issue.body?.split('\n').includes(`Filed from Muse email ${mail.id}`));
-        const duplicate = findDuplicate(route.title, mail.id, state.issues)
-          ?? exactRecovery.find(issue => normalizeTitle(route.title).sort().join(' ') === normalizeTitle(issue.title).sort().join(' '));
-        if (duplicate) { report({ ...base, action: 'duplicate', ...(duplicate.number ? { issue: duplicate.number } : { reason: 'Duplicates a finding already planned in this dry run' }) }); continue; }
+        const duplicate = duplicateMatch(route.title, mail.id, state.issues, finding)
+          ?? duplicateMatch(route.title, mail.id, exactRecovery.filter(issue => normalizeTitle(route.title).sort().join(' ') === normalizeTitle(issue.title).sort().join(' ')), finding);
+        if (duplicate) { report({ ...base, action: 'duplicate', ...(duplicate.issue.number ? { issue: duplicate.issue.number } : { reason: 'Duplicates a finding already planned in this dry run' }),
+          ...(deps.explain ? { rule: duplicate.rule, shared_tokens: duplicate.shared_tokens } : {}) }); continue; }
+        const cited = new Set(Object.values(finding).flatMap(value => [...value.matchAll(/#(\d+)\b/g)].map(match => Number(match[1]))));
+        const possible = state.references.find(issue => cited.has(issue.number));
+        if (possible) {
+          complete = false;
+          report({ ...base, action: 'possible_duplicate', issue: possible.number,
+            ...(deps.explain ? { rule: 'cited_issue' as const, shared_tokens: [`#${possible.number}`] } : {}) });
+          continue;
+        }
         if (filed >= 10) { complete = false; run.skipped.push({ message_id: mail.id, reason: '10-issue cap reached' }); output({ ...base, deferred: '10-issue cap reached' }); continue; }
         const labels = ['muse-test', 'needs-spec'];
         // Only use an unambiguous, already-existing highest-priority label.
@@ -260,8 +312,8 @@ export function gmailAdapter(gmail: Pick<gmail_v1.Gmail, 'users'>): GmailClient 
 }
 
 export function parseArgs(args: string[]): boolean {
-  if (args.some(arg => arg !== '--apply' && arg !== '--dry-run') || (args.includes('--apply') && args.includes('--dry-run'))) {
-    throw new Error('Usage: muse-filer [--dry-run | --apply]');
+  if (args.some(arg => !['--apply', '--dry-run', '--explain'].includes(arg)) || (args.includes('--apply') && args.includes('--dry-run'))) {
+    throw new Error('Usage: muse-filer [--dry-run | --apply] [--explain]');
   }
   return args.includes('--apply');
 }
@@ -278,7 +330,7 @@ async function main() {
     const { getGmailClient } = await import('../gmail/client.js');
     const exec = promisify(execFile);
     await runFiler({
-      gmail: gmailAdapter(await getGmailClient('kevin.m.desler@gmail.com')), apply,
+      gmail: gmailAdapter(await getGmailClient('kevin.m.desler@gmail.com')), apply, explain: process.argv.includes('--explain'),
       gh: async args => (await exec('gh', args, { maxBuffer: 64 * 1024 * 1024 })).stdout,
       output: value => console.log(JSON.stringify(value)),
       record: async run => { await appendFile(join(directory, 'runs.jsonl'), JSON.stringify(run) + '\n', { mode: 0o600 }); },
