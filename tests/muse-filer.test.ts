@@ -193,7 +193,7 @@ test('email instructions stay literal data and are never sent to a shell', async
 test('Gmail adapter snapshots paginated ids, filters subjects and labels, ignores attachments', async () => {
   const operations: string[] = [];
   const messages: Record<string, any> = {
-    m1: { payload: { headers: [{ name: 'Subject', value: '[Muse] Spec test 2026-11-08' }], parts: [
+    m1: { payload: { headers: [{ name: 'Subject', value: '[Muse] Spec test 2026-11-08' }, { name: 'From', value: 'Kevin Desler <kevin.m.desler@gmail.com>' }], parts: [
       { mimeType: 'text/plain', body: { data: Buffer.from(nothing).toString('base64url') } },
       { mimeType: 'text/plain', filename: 'attachment.txt', body: { data: Buffer.from(good).toString('base64url') } },
     ] } },
@@ -213,6 +213,47 @@ test('Gmail adapter snapshots paginated ids, filters subjects and labels, ignore
   for await (const item of client.messages()) { seen.push(item); await client.markFiled(item.id); }
   assert.deepEqual(seen, [mail(nothing, 'm1', '[Muse] Spec test 2026-11-08')]);
   assert.deepEqual(operations.slice(0, 3), ['list', 'list', 'get']);
+});
+
+test('Gmail adapter admits only Kevin authenticated non-spam mail before reading bodies', async () => {
+  const acceptedBody = Buffer.from(nothing).toString('base64url');
+  const headers = (from: string, auth?: string) => [
+    { name: 'Subject', value: '[Muse] Spec test' }, { name: 'From', value: from },
+    ...(auth ? [{ name: 'Authentication-Results', value: auth }] : []),
+  ];
+  const messages: Record<string, any> = {
+    good: { payload: { headers: headers('Kevin <kevin.m.desler@gmail.com>', 'mx.google.com; dkim=pass spf=pass dmarc=pass'), parts: [{ mimeType: 'text/plain', body: { data: acceptedBody } }] } },
+    other: { payload: { headers: headers('attacker@example.com'), parts: [] } },
+    spoof: { payload: { headers: headers('Kevin <evil@example.com>'), parts: [] } },
+    spam: { labelIds: ['SPAM'], payload: { headers: headers('kevin.m.desler@gmail.com'), parts: [] } },
+    dkim: { payload: { headers: headers('kevin.m.desler@gmail.com', 'mx.google.com; dkim=fail (bad) spf=pass dmarc=pass'), parts: [] } },
+    spf: { payload: { headers: headers('kevin.m.desler@gmail.com', 'mx.google.com; dkim=pass spf=fail dmarc=pass'), parts: [] } },
+    dmarc: { payload: { headers: headers('kevin.m.desler@gmail.com', 'mx.google.com; dkim=pass spf=pass dmarc=fail'), parts: [] } },
+  };
+  const gmail: any = { users: {
+    labels: { list: async () => ({ data: { labels: [] } }) },
+    messages: {
+      list: async () => ({ data: { messages: Object.keys(messages).map(id => ({ id })) } }),
+      get: async ({ id }: any) => ({ data: messages[id] }),
+    },
+  } };
+  const client = gmailAdapter(gmail);
+  const seen: Mail[] = [];
+  for await (const item of client.messages()) seen.push(item);
+  assert.deepEqual(seen.map(item => item.id), Object.keys(messages));
+  assert.equal(seen[0].body, nothing);
+  assert.deepEqual(seen.slice(1).map(item => item.rejected), Array(6).fill('sender not allowed'));
+  assert.ok(seen.slice(1).every(item => item.body === ''));
+
+  const records: Run[] = [];
+  const run = await runFiler({ gmail: client, gh: async () => { throw new Error('Rejected mail reached GitHub'); }, record: async item => { records.push(item); } });
+  assert.deepEqual(run.skipped, [
+    { message_id: 'good', reason: 'nothing found' },
+    ...Object.keys(messages).slice(1).map(message_id => ({ message_id, reason: 'sender not allowed' })),
+  ]);
+  assert.equal(run.planned.length, 0);
+  assert.equal(run.results.length, 0);
+  assert.deepEqual(records[0].skipped, run.skipped);
 });
 
 test('Gmail creates muse-filed only on explicit markFiled; adds no other labels', async () => {

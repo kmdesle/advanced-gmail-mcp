@@ -76,7 +76,7 @@ export function issueBody(finding: Finding, messageId: string): string {
 }
 
 export type Gh = (args: string[]) => Promise<string>;
-export interface Mail { id: string; subject: string; body: string }
+export interface Mail { id: string; subject: string; body: string; rejected?: string }
 export interface GmailClient {
   messages(): AsyncIterable<Mail>;
   markFiled(id: string): Promise<void>;
@@ -123,6 +123,11 @@ export async function runFiler(deps: {
   function report(result: Result) { run.results.push(result); output(result); }
   try {
     for await (const mail of deps.gmail.messages()) {
+      if (mail.rejected) {
+        run.skipped.push({ message_id: mail.id, reason: mail.rejected });
+        output({ message_id: mail.id, reason: mail.rejected });
+        continue;
+      }
       if (!mail.subject.startsWith('[Muse] Spec')) continue;
       const parsed = parseEmail(mail.body);
       for (const verdict of parsed.regressions) {
@@ -204,6 +209,16 @@ export function gmailAdapter(gmail: Pick<gmail_v1.Gmail, 'users'>): GmailClient 
         if (filedLabel && message.labelIds?.includes(filedLabel)) continue;
         const subject = message.payload?.headers?.find(header => header.name?.toLowerCase() === 'subject')?.value ?? '';
         if (!subject.startsWith('[Muse] Spec')) continue;
+        const headers = message.payload?.headers ?? [];
+        const from = headers.find(header => header.name?.toLowerCase() === 'from')?.value ?? '';
+        const address = from.match(/<\s*([^<>\s]+)\s*>/)?.[1] ?? from.trim();
+        const authResults = headers.filter(header => header.name?.toLowerCase() === 'authentication-results')
+          .map(header => header.value ?? '').filter(value => /^\s*mx\.google\.com\s*;/i.test(value));
+        const authFailed = authResults.some(value => /\b(?:dkim|spf|dmarc)=fail\b/i.test(value));
+        if (address.toLowerCase() !== 'kevin.m.desler@gmail.com' || message.labelIds?.includes('SPAM') || authFailed) {
+          yield { id, subject, body: '', rejected: 'sender not allowed' };
+          continue;
+        }
         const plain: string[] = [];
         const visit = (part: gmail_v1.Schema$MessagePart) => {
           if (part.filename) return;

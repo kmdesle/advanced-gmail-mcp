@@ -352,6 +352,9 @@ above, pointed at the Slack `alerts.jsonl`.
 `kevin.m.desler@gmail.com`, resolved through the existing `accounts.json` and
 OAuth client. It selects subjects starting exactly with `[Muse] Spec` and skips
 messages already labeled `muse-filed`. Use the existing authenticated `gh` CLI.
+It accepts only mail whose From address is exactly `kevin.m.desler@gmail.com`,
+skips SPAM-labeled messages, and rejects Google authentication results containing
+`dkim=fail`, `spf=fail`, or `dmarc=fail` before reading the message body.
 
 ```bash
 npm run muse-filer                 # dry-run by default
