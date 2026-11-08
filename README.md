@@ -445,10 +445,10 @@ limit. Pull requests are excluded. Matching is deterministic, without an LLM:
 - Normalized title token-Jaccard >= 0.7 remains a duplicate. Exact normalized
   titles with a matching `Filed from Muse email <message_id>` footer also recover
   partial runs, including closed or unlabeled issues updated within 14 days.
-- Rule A: if no duplicate rule matches, a `#N` reference in any finding field to
+- Rule A: if no Jaccard, footer, or Rule B match applies, a `#N` reference in any finding field to
   an issue in the target repository that is open or closed within 14 days yields
   `possible_duplicate`. Apply never files these findings and leaves their email
-  pending for review. Other repositories cannot resolve the reference.
+  pending for review. A Rule B match still files, with the related section, even when the finding also cites an issue. Other repositories cannot resolve the reference.
 
 Add `--explain` to print the matching rule and shared tokens for each duplicate,
 related match, or possible duplicate, for example `npm run muse-filer -- --dry-run --explain`.

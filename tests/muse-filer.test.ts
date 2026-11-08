@@ -497,6 +497,7 @@ test('Rule B files with POSSIBLY RELATED section and ignores in-run planned dupl
     number: 2278,
     title: 'get_macro_trends - Richmond HPI YoY 0.80% does not match published FHFA',
     body: 'Richmond HPI 0.80% vs FHFA 1.83%',
+    labels: [{ name: 'muse-test' }],
   };
   const findingB = 'TITLE: Inflecto: get_macro_trends is missing HPI and home prices for the largest metros\nREPRO: Inspect\nACTUAL: Richmond HPI 0.80% from get_macro_trends';
   const hB = harness([mail(findingB)], { explain: true, issues: [issue2278] });

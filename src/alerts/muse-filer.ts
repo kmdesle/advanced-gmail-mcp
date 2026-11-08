@@ -224,16 +224,18 @@ export async function runFiler(deps: {
           ?? duplicateMatch(route.title, mail.id, exactRecovery.filter(issue => normalizeTitle(route.title).sort().join(' ') === normalizeTitle(issue.title).sort().join(' ')));
         if (duplicate) { report({ ...base, action: 'duplicate', ...(duplicate.issue.number ? { issue: duplicate.issue.number } : { reason: 'Duplicates a finding already planned in this dry run' }),
           ...(deps.explain ? { rule: duplicate.rule, shared_tokens: duplicate.shared_tokens } : {}) }); continue; }
+        // In-run plans use number 0 and are invisible to Rule B; Jaccard still sees them.
+        const related = distinctiveMatch(route.title, finding, state.issues.filter(issue => issue.number > 0));
         const cited = new Set(Object.values(finding).flatMap(value => [...value.matchAll(/#(\d+)\b/g)].map(match => Number(match[1]))));
         const possible = state.references.find(issue => cited.has(issue.number));
-        if (possible) {
+        // A citation stays non-filing only when Rule B did not already relate the finding.
+        if (!related && possible) {
           complete = false;
           report({ ...base, action: 'possible_duplicate', issue: possible.number,
             ...(deps.explain ? { rule: 'cited_issue' as const, shared_tokens: [`#${possible.number}`] } : {}) });
           continue;
         }
         if (filed >= 10) { complete = false; run.skipped.push({ message_id: mail.id, reason: '10-issue cap reached' }); output({ ...base, deferred: '10-issue cap reached' }); continue; }
-        const related = distinctiveMatch(route.title, finding, state.issues.filter(issue => issue.number > 0));
         const labels = ['muse-test', 'needs-spec'];
         // Only use an unambiguous, already-existing highest-priority label.
         const priorities = state.labels.filter(label => /^(?:p[01]|priority:\s*(?:critical|high|highest|p[01])|priority[- ](?:critical|high))$/i.test(label));
