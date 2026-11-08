@@ -40,30 +40,30 @@ async function harness(t: Parameters<Parameters<typeof test>[1]>[0], checkedThro
 }
 
 test('missing slots alert once across restarts, recover once, and span UTC midnight', async t => {
-  const h = await harness(t);
-  assert.equal((await h.run(time('19:59'))).length, 0);
-  assert.equal((await h.run(time('20:00')))[0].color, 'amber');
-  assert.equal((await h.run(time('20:17'))).length, 0);
-  h.set([mail('late', 'Muse Inflecto test latest', time('20:20'))]);
-  assert.equal((await h.run(time('20:30')))[0].color, 'green');
-  assert.equal((await h.run(time('20:40'))).length, 0);
+  const h = await harness(t, time('20:00'));
+  assert.equal((await h.run(time('22:59'))).length, 0);
+  assert.equal((await h.run(time('23:00')))[0].color, 'amber');
+  assert.equal((await h.run(time('23:17'))).length, 0);
+  h.set([mail('late', 'Muse Inflecto test latest', time('23:20'))]);
+  assert.equal((await h.run(time('23:30')))[0].color, 'green');
+  assert.equal((await h.run(time('23:40'))).length, 0);
   h.set([]);
-  await h.run(time('23:00'));
+  await h.run(Date.parse('2026-11-09T01:00:00Z'));
   const next = await h.run(Date.parse('2026-11-09T02:00:00Z'));
   assert.ok(next.some(n => n.key === 'slot:2026-11-09T00:00:00.000Z'));
-  assert.equal(h.posted.filter(n => n.key.includes('18:00')).length, 2);
+  assert.equal(h.posted.filter(n => n.key.includes('21:00')).length, 2);
 });
 
 test('report subject prefixes and received timestamps determine the two-hour window', async t => {
   for (const subject of ['Muse Inflecto test daily', '[Muse] Spec daily']) {
-    const h = await harness(t);
-    h.set([mail('r', subject, time('20:00'))]);
-    assert.equal((await h.run(time('20:00'))).length, 0);
+    const h = await harness(t, time('20:00'));
+    h.set([mail('r', subject, time('23:00'))]);
+    assert.equal((await h.run(time('23:00'))).length, 0);
   }
-  const h = await harness(t);
-  h.set([mail('r', 'Re: Muse Inflecto test daily', time('19:00')),
-    mail('out', '[Muse] Spec outgoing', time('19:00'), { from: account, to: muse })]);
-  assert.equal((await h.run(time('20:00')))[0].color, 'amber');
+  const h = await harness(t, time('20:00'));
+  h.set([mail('r', 'Re: Muse Inflecto test daily', time('22:00')),
+    mail('out', '[Muse] Spec outgoing', time('22:00'), { from: account, to: muse })]);
+  assert.equal((await h.run(time('23:00')))[0].color, 'amber');
 });
 
 test('orders use both allowed senders, label or prefix, exclusions, recipient and 15 minute deadline', async t => {
@@ -141,26 +141,26 @@ test('webhook routing drops green and amber when their own destination is absent
 });
 
 test('unknown source never recovers existing failures; source amber and recovery each post once', async t => {
-  const h = await harness(t);
-  await h.run(time('20:00'));
+  const h = await harness(t, time('20:00'));
+  await h.run(time('23:00'));
   h.fail(true);
-  assert.equal((await h.run(time('20:10')))[0].key, 'source');
-  assert.equal((await h.run(time('20:15'))).length, 0);
+  assert.equal((await h.run(time('23:10')))[0].key, 'source');
+  assert.equal((await h.run(time('23:15'))).length, 0);
   h.fail(false);
-  const recovered = await h.run(time('20:20'));
+  const recovered = await h.run(time('23:20'));
   assert.deepEqual(recovered.map(n => n.key), ['source']);
-  assert.equal(JSON.parse(await readFile(h.statePath, 'utf8')).alerts['slot:2026-11-08T18:00:00.000Z'].active, true);
+  assert.equal(JSON.parse(await readFile(h.statePath, 'utf8')).alerts['slot:2026-11-08T21:00:00.000Z'].active, true);
 });
 
 test('dry-run neither posts nor changes state; failed posts remain retryable', async t => {
-  const h = await harness(t);
+  const h = await harness(t, time('20:00'));
   const before = await readFile(h.statePath, 'utf8');
-  assert.equal((await h.run(time('20:00'), true)).length, 1);
+  assert.equal((await h.run(time('23:00'), true)).length, 1);
   assert.equal(h.posted.length, 0);
   assert.equal(await readFile(h.statePath, 'utf8'), before);
-  await assert.rejects(h.run(time('20:00'), false, async () => { throw new Error('post failed'); }));
+  await assert.rejects(h.run(time('23:00'), false, async () => { throw new Error('post failed'); }));
   assert.equal(await readFile(h.statePath, 'utf8'), before);
-  assert.equal((await h.run(time('20:00'))).length, 1);
+  assert.equal((await h.run(time('23:00'))).length, 1);
 });
 
 test('malformed state fails closed, argument parsing and shared fleet config', async t => {
@@ -181,5 +181,41 @@ test('a timely Ack suppresses amber; a late Ack records the missed deadline then
       mail('a', '[Muse] Ack: [Muse] Task', time(`17:${minute}`))]);
     assert.deepEqual((await h.run(time('17:30'))).map(n => n.color), expected);
     assert.equal((await h.run(time('17:40'))).length, 0);
+  }
+});
+
+test('hourly slots: missing report >2h raises REPORT MISSING, inside window does not, pre-start never alerts, 24 slots/day evaluated', async t => {
+  // Pre-start slot never alerts: evaluated at 2026-11-08T22:30:00Z with checkedThrough = 18:00
+  // Slots 18:00, 19:00, 20:00 are before HOURLY_START (2026-11-08T21:00:00Z) so they never alert even >2h after.
+  const hPre = await harness(t, time('18:00'));
+  const preNotices = await hPre.run(time('22:30')); // slot 20:00 is >2h past, slot 21:00 is not >2h past (only 1.5h)
+  assert.equal(preNotices.length, 0);
+
+  // Hourly slot with no report >2h after raises REPORT MISSING
+  const hMiss = await harness(t, time('20:00'));
+  const missNotices = await hMiss.run(time('23:01')); // slot 21:00 is >2h past (>23:00)
+  assert.equal(missNotices.length, 1);
+  assert.equal(missNotices[0].key, 'slot:2026-11-08T21:00:00.000Z');
+  assert.equal(missNotices[0].color, 'amber');
+  assert.match(missNotices[0].text, /REPORT MISSING after 2026-11-08T21:00:00\.000Z/);
+
+  // Hourly slot with a report inside its window does not alert
+  const hRep = await harness(t, time('20:00'));
+  hRep.set([mail('r', 'Muse Inflecto test hourly', time('22:15'))]); // within [21:00, 23:00]
+  const repNotices = await hRep.run(time('23:01'));
+  assert.equal(repNotices.length, 0);
+
+  // 24 slots evaluated in a full day (2026-11-09)
+  // checkedThrough is at the end of 2026-11-08 (2026-11-08T24:00:00Z = 2026-11-09T00:00:00Z - 1ms, or slot 22:00 from previous day + 2h).
+  // When checkedThrough = Date.parse('2026-11-09T00:00:00Z'), slot 2026-11-09T00:00:00Z + 2h = 02:00:00Z.
+  // Running at 2026-11-10T01:00:00Z evaluates exactly slots 00:00 through 23:00 (23:00 + 2h = 2026-11-10T01:00:00Z <= now).
+  const dayStart = Date.parse('2026-11-09T00:00:00Z');
+  const hDay = await harness(t, dayStart);
+  const dayEnd = Date.parse('2026-11-10T01:00:00Z');
+  const allNotices = await hDay.run(dayEnd);
+  assert.equal(allNotices.length, 24);
+  for (let i = 0; i < 24; i++) {
+    const slotHourStr = String(i).padStart(2, '0');
+    assert.ok(allNotices.some(n => n.key === `slot:2026-11-09T${slotHourStr}:00:00.000Z` && n.color === 'amber'));
   }
 });

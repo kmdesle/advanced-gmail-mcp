@@ -7,6 +7,7 @@ import type { gmail_v1 } from 'googleapis';
 import { parseWebhookConfig } from './watcher.js';
 
 const HOUR = 3_600_000;
+export const HOURLY_START = Date.parse('2026-11-08T21:00:00Z');
 const ACCOUNT = 'kevin@cyberwingman.ai';
 const MUSE = 'kevin.m.desler@gmail.com';
 export interface ReadonlyMuseGmail {
@@ -109,9 +110,9 @@ export async function runMuseWatch(deps: {
   const acks = incoming.filter(m => m.subject.startsWith('[Muse] Ack: '));
   const start = Math.floor(state.checkedThrough / (24 * HOUR)) * 24 * HOUR;
   for (let day = start; day <= now; day += 24 * HOUR) {
-    for (const hour of [0, 3, 18, 21]) {
+    for (let hour = 0; hour < 24; hour++) {
       const slot = day + hour * HOUR;
-      if (slot + 2 * HOUR <= state.checkedThrough || slot + 2 * HOUR > now) continue;
+      if (slot < HOURLY_START || slot + 2 * HOUR <= state.checkedThrough || slot + 2 * HOUR > now) continue;
       const key = `slot:${new Date(slot).toISOString()}`;
       const report = reports.find(m => m.time >= slot && m.time <= slot + 2 * HOUR);
       if (!report && !(firstEvaluation && slot + 2 * HOUR < now)) await transition(key, true, `REPORT MISSING after ${new Date(slot).toISOString()}`);
