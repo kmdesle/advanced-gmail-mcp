@@ -1,11 +1,20 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { afterEach, test } from 'node:test';
+import { after, afterEach, test } from 'node:test';
 import { AccountWatcher, matchesRule, parseRules, type ReadonlyGmail, type Alert } from '../src/alerts/watcher.js';
 
 const rule = { account: 'tractic', from: ['alfred.gpt@ktagroupinc.com'], tag: 'ALFRED' };
 const directories: string[] = [];
+const originalFetch = globalThis.fetch;
+globalThis.fetch = (async (input, init) => {
+  const url = String(input);
+  if (!url.startsWith('https://hooks.invalid/')) {
+    throw new Error(`Unexpected fetch URL in alerts tests: ${url}`);
+  }
+  return originalFetch(input, init);
+}) as typeof fetch;
+after(() => { globalThis.fetch = originalFetch; });
 afterEach(async () => {
   for (const dir of directories.splice(0)) await rm(dir, { recursive: true });
 });
@@ -166,7 +175,7 @@ test('invalid_grant from token loading immediately emits ERROR without leaking r
   const f = await setup();
   const watcher = new AccountWatcher('tractic', [rule], f.dir, async () => {
     throw new Error('Token refresh failed: invalid_grant SECRET');
-  }, line => f.logs.push(line));
+  }, line => f.logs.push(line), () => new Date('2026-10-30T00:00:00Z'), f.envPath);
   await watcher.poll();
   await watcher.poll();
   const alerts = await f.alerts();
