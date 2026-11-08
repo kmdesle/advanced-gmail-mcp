@@ -85,16 +85,15 @@ export function distinctiveTokens(value: string): string[] {
 interface DuplicateMatch { issue: Issue; rule: 'title_jaccard' | 'email_footer' | 'distinctive_tokens'; shared_tokens: string[] }
 function duplicateMatch(title: string, messageId: string, issues: Issue[], finding: Finding): DuplicateMatch | undefined {
   const source = normalizeText(`${finding.TITLE ?? title}\n${finding.ACTUAL ?? ''}`);
+  const findingTitleTools = new Set([...normalizeText(finding.TITLE ?? title).matchAll(/\b(?:get|list|search|create|update|delete|submit|snooze|dismiss|mark)_[a-z0-9_]+\b/g)].map(match => match[0]));
   const phrases = new Set([...source.matchAll(/"([^"\n]+)"/g)].map(match => match[1].trim()).filter(Boolean));
   const tokens = distinctiveTokens(source);
   for (const issue of issues) {
     const text = normalizeText(`${issue.title}\n${issue.body ?? ''}`);
     const existingTokens = new Set(distinctiveTokens(text));
     const title = normalizeText(issue.title);
-    const titleTools = new Set([
-      ...title.matchAll(/\b(?:get|list|search|create|update|delete|submit|snooze|dismiss|mark)_[a-z0-9_]+\b/g),
-      ...title.matchAll(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g),
-    ].map(match => match[0]));
+    const titleTools = new Set([...title.matchAll(/\b(?:get|list|search|create|update|delete|submit|snooze|dismiss|mark)_[a-z0-9_]+\b/g)]
+      .map(match => match[0]).filter(tool => findingTitleTools.has(tool)));
     const shared = tokens.filter(token => existingTokens.has(token)
       || phrases.has(token) && new RegExp(`(?<![\\p{L}\\p{N}_])${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}_])`, 'u').test(text));
     const hasAnchor = shared.some(token => phrases.has(token) && token.length >= 12

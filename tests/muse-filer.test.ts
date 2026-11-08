@@ -355,7 +355,7 @@ for (const [index, fixture] of distinctivePairs.entries()) {
 }
 
 test('Rule B uses ACTUAL and issue body, normalizes quotes/dashes, and counts distinct whole tokens', async () => {
-  const h = harness([mail('TITLE: Inflecto: A different headline\nREPRO: Inspect\nACTUAL: “Source–freshness” is 0.80% in get_macro_trends')], {
+  const h = harness([mail('TITLE: Inflecto: get_macro_trends source freshness\nREPRO: Inspect\nACTUAL: “Source–freshness” is 0.80% in get_macro_trends')], {
     explain: true, issues: [{ number: 9, title: 'Muse: get_macro_trends old audit', body: 'Source-freshness: 0.80% reported by GET_MACRO_TRENDS' }],
   });
   const run = await h.run();
@@ -432,6 +432,23 @@ test('Rule B does not anchor quoted JSON keys, while the Richmond HPI phrase sti
   assert.equal(findDuplicate('get_macro_trends is missing HPI from Richmond "Richmond HPI YoY 0.80%"', 'm1', [
     { number: 2278, title: issue.title, body: 'The Richmond HPI value is 0.80%. "Richmond HPI YoY 0.80%"' },
   ])?.number, 2278);
+});
+
+test('Rule B requires the same prefixed tool in both titles', () => {
+  const finding = 'Inflecto: get_opportunities ranks by a null column';
+  for (const issue of [
+    { number: 2277, title: 'Muse: get_macro_trends - Chicago median_rent $5,000 is stale and unverified' },
+    { number: 2278, title: 'get_macro_trends - Richmond HPI YoY 0.80% does not match published FHFA' },
+  ]) assert.notEqual(findDuplicate(finding, 'm1', [issue]), issue);
+
+  assert.equal(findDuplicate('get_macro_trends is missing HPI and home prices: "Richmond HPI YoY 0.80%"', 'm1', [
+    { number: 2278, title: 'get_macro_trends - Richmond HPI YoY 0.80% does not match published FHFA', body: 'Richmond HPI is missing: 0.80% "Richmond HPI YoY 0.80%"' },
+  ])?.number, 2278);
+
+  assert.equal(findDuplicate('convergence_narrative is null for 6 of 8 metros', 'm1', [
+    { number: 2277, title: 'Muse: get_macro_trends - Chicago median_rent $5,000 is stale and unverified' },
+    { number: 2278, title: 'get_macro_trends - Richmond HPI YoY 0.80% does not match published FHFA' },
+  ]), undefined);
 });
 
 test('two clearly different findings in the same repo remain separate', async () => {
