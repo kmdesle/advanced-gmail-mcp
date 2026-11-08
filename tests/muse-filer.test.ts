@@ -241,3 +241,11 @@ test('footer recovery requires matching message id and title; fuzzy closed issue
   const recovered = harness([mail(duplicateTitle)], { apply: true, recovery: [{ number: 3, title, body: 'Filed from Muse email m1' }] });
   assert.equal((await recovered.run()).results[0].issue, 3);
 });
+
+
+test('issue references and verdict words inside a field remain finding data', () => {
+  const parsed = parseEmail('TITLE: Wren: Broken save\nREPRO: Open settings\nFail as seen in #123\nACTUAL: Broken\nEVIDENCE: Regression #456 still fails');
+  assert.equal(parsed.findings[0].REPRO, 'Open settings\nFail as seen in #123');
+  assert.equal(parsed.findings[0].EVIDENCE, 'Regression #456 still fails');
+  assert.deepEqual(parsed.regressions, []);
+});

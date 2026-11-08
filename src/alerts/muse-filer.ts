@@ -38,7 +38,7 @@ export function parseEmail(body: string): { findings: Finding[]; regressions: st
       if (!current) { current = {}; findings.push(current); }
       current[name] = match[2];
       field = name;
-    } else if ((regressionSection || /\b(?:regression|pass|fail|fixed|still broken)\b/i.test(line)) && /#\d+\b/.test(line)) {
+    } else if (regressionSection && /#\d+\b/.test(line)) {
       regressions.push(line.trim());
       field = undefined;
     } else if (current && field) {
