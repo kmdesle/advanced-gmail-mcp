@@ -896,3 +896,65 @@ test('22. other label create errors still abort', async () => {
     /403/,
   );
 });
+
+// --- per-product run budget (#39) ---
+
+// Same shape for both products; only the tier differs because each product runs a different tier set.
+function budgetMatrix(tier: string) {
+  const mcp = Array.from({ length: 40 }, (_, i) => makeCell(`mcp-${i}`, { tier, est_mcp_calls: 3 }));
+  const browser = Array.from({ length: 8 }, (_, i) => makeCell(`browser-${i}`, { tier, surface: 'browser', est_mcp_calls: 0 }));
+  return makeMatrix([...mcp, ...browser]);
+}
+
+async function planBudget(product: 'inflecto' | 'sendinel', issues?: GitHubIssue[]) {
+  const tmpDir = await mkdtemp(join(tmpdir(), 'planner-test-'));
+  try {
+    const matrix = budgetMatrix(product === 'sendinel' ? 'member' : 'pro');
+    const { gh } = makeGh({ matrix, issues });
+    const res = await runPlanner({ gh, gmail: makeGmail([]), statePath: join(tmpDir, 'ledger.json'), product, now: FIXED_NOW });
+    const chosen = matrix.cells.filter(c => res.brief.includes(`### \`${c.id}\``));
+    return {
+      mode: res.mode,
+      cells: chosen.length,
+      mcpCalls: chosen.filter(c => c.surface === 'mcp').reduce((n, c) => n + c.est_mcp_calls, 0),
+      browser: chosen.filter(c => c.surface === 'browser').length,
+    };
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+}
+
+test('23. product budget config: inflecto unchanged (30/35 calls, 2 browser), sendinel 55/60 and 3', () => {
+  assert.equal(PRODUCTS.inflecto.maxMcpCalls, 30);
+  assert.equal(PRODUCTS.inflecto.maxMcpCallsRetestOnly, 35);
+  assert.equal(PRODUCTS.inflecto.maxBrowserCells, 2);
+  assert.equal(PRODUCTS.sendinel.maxMcpCalls, 55);
+  assert.equal(PRODUCTS.sendinel.maxMcpCallsRetestOnly, 60);
+  assert.equal(PRODUCTS.sendinel.maxBrowserCells, 3);
+});
+
+test('24. inflecto planned budget regression: <=30 calls and <=2 browser cells in NORMAL', async () => {
+  const r = await planBudget('inflecto');
+  assert.equal(r.mode, 'NORMAL');
+  assert.equal(r.mcpCalls, 30);
+  assert.equal(r.browser, 2);
+});
+
+test('25. sendinel selects more cells than inflecto for the same matrix; browser cap 3, <=55 calls', async () => {
+  const inf = await planBudget('inflecto');
+  const sen = await planBudget('sendinel');
+  assert.equal(sen.mode, 'NORMAL');
+  assert(sen.cells > inf.cells, `sendinel ${sen.cells} should exceed inflecto ${inf.cells}`);
+  assert.equal(sen.browser, 3);
+  assert(sen.mcpCalls <= 55 && sen.mcpCalls > 30, `sendinel mcpCalls ${sen.mcpCalls}`);
+  assert.equal(sen.mcpCalls, 54); // 18 cells x 3 calls: largest multiple of 3 within 55
+});
+
+test('26. RETEST_ONLY budget: sendinel 60 calls, inflecto 35', async () => {
+  const issues: GitHubIssue[] = Array.from({ length: 16 }, (_, i) => ({ number: 3000 + i, state: 'OPEN', title: `Open ${i}` }));
+  const inf = await planBudget('inflecto', issues);
+  const sen = await planBudget('sendinel', issues);
+  assert.equal(inf.mode, 'RETEST_ONLY');
+  assert.equal(sen.mode, 'RETEST_ONLY');
+  assert(inf.mcpCalls <= 35 && sen.mcpCalls <= 60);
+});
