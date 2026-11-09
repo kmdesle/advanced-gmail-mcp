@@ -20,6 +20,8 @@ export interface MatrixCell {
   guards: number[];
   smoke: boolean;
   weekly: boolean;
+  muse_runnable?: boolean;
+  muse_blocked_reason?: string | null;
 }
 
 export interface Matrix {
@@ -134,6 +136,11 @@ export const RUNNER_CAPABILITIES: Capabilities = {
   browser: ['free', 'pro', 'premium'],
 };
 
+export const SENDINEL_CAPABILITIES: Capabilities = {
+  mcp: ['member'],
+  browser: ['anonymous', 'member'],
+};
+
 export type ProductId = 'inflecto' | 'sendinel';
 
 export interface ProductConfig {
@@ -194,7 +201,7 @@ export const PRODUCTS: Record<ProductId, ProductConfig> = {
     pinBrief: true,
     gmailQuery: 'subject:"[Muse] Spec Sendinel"',
     subjectPrefixes: ['[Muse] Spec Sendinel'],
-    capabilities: RUNNER_CAPABILITIES,
+    capabilities: SENDINEL_CAPABILITIES,
     rules: [
       'use ONLY the Muse sandbox project and the Muse test user; sandbox project only',
       'allowlisted targets only: never send to anyone outside the project allowlist',
@@ -219,6 +226,7 @@ export const productStatePath = (product: ProductConfig) => join(stateDir(), pro
 export const defaultStatePath = () => productStatePath(PRODUCTS.inflecto);
 
 export function isCellRunnableByMuse(cell: MatrixCell, capabilities: Capabilities = RUNNER_CAPABILITIES): boolean {
+  if (cell.muse_runnable === false) return false;
   if (!Object.hasOwn(capabilities, cell.surface)) return false;
   const allowedTiers = capabilities[cell.surface];
   if (!allowedTiers) return false;

@@ -8,6 +8,7 @@ import {
   normalizeBrief,
   generateBriefText,
   computeScoreboard,
+  isCellRunnableByMuse,
   runPlanner,
   parseArgs,
   parsePlannerArgs,
@@ -36,6 +37,7 @@ function makeCell(id: string, overrides: Partial<MatrixCell> = {}): MatrixCell {
     guards: overrides.guards ?? [],
     smoke: overrides.smoke ?? false,
     weekly: overrides.weekly ?? false,
+    ...(overrides.muse_runnable === undefined ? {} : { muse_runnable: overrides.muse_runnable }),
   };
 }
 
@@ -802,4 +804,41 @@ test('19. Sendinel dry run from a fixture matrix prints a Sendinel brief and wri
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
+});
+
+test('13. sendinel capabilities and muse_runnable flag (51 of 69 runnable)', () => {
+  assert.deepEqual(PRODUCTS.sendinel.capabilities, { mcp: ['member'], browser: ['anonymous', 'member'] });
+
+  const cells: MatrixCell[] = [];
+  const add = (n: number, surface: 'mcp' | 'browser', tier: string, runnable?: boolean) => {
+    for (let i = 0; i < n; i++) {
+      cells.push(makeCell(`s-${surface}-${tier}-${runnable}-${i}`, {
+        surface,
+        tier,
+        ...(runnable === undefined ? {} : { muse_runnable: runnable }),
+      }));
+    }
+  };
+  add(44, 'mcp', 'member', true);
+  add(15, 'mcp', 'member', false);
+  add(3, 'mcp', 'admin', false);
+  add(1, 'browser', 'anonymous', true);
+  add(6, 'browser', 'member', true);
+  assert.equal(cells.length, 69);
+
+  const caps = PRODUCTS.sendinel.capabilities;
+  const runnable = cells.filter(c => isCellRunnableByMuse(c, caps));
+  assert.equal(runnable.length, 51);
+
+  // Inflecto capabilities would have rejected every sendinel cell (the original bug).
+  assert.equal(cells.filter(c => isCellRunnableByMuse(c, PRODUCTS.inflecto.capabilities)).length, 0);
+});
+
+test('14. muse_runnable=false blocks a cell; inflecto behavior unchanged', () => {
+  const caps = PRODUCTS.inflecto.capabilities;
+  assert.equal(isCellRunnableByMuse(makeCell('i1', { surface: 'mcp', tier: 'pro' }), caps), true);
+  assert.equal(isCellRunnableByMuse(makeCell('i2', { surface: 'mcp', tier: 'free' }), caps), false);
+  assert.equal(isCellRunnableByMuse(makeCell('i3', { surface: 'browser', tier: 'free' }), caps), true);
+  assert.equal(isCellRunnableByMuse(makeCell('i4', { surface: 'mcp', tier: 'pro', muse_runnable: true }), caps), true);
+  assert.equal(isCellRunnableByMuse(makeCell('i5', { surface: 'mcp', tier: 'pro', muse_runnable: false }), caps), false);
 });
