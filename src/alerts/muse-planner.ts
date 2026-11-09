@@ -160,6 +160,12 @@ export interface ProductConfig {
   gmailQuery: string;
   subjectPrefixes: string[];
   capabilities: Capabilities;
+  /** Per-run MCP call budget in NORMAL mode (already net of the 5-call exploratory reserve). */
+  maxMcpCalls: number;
+  /** Per-run MCP call budget in RETEST_ONLY mode (no exploratory section, so reserve is not held back). */
+  maxMcpCallsRetestOnly: number;
+  /** Per-run cap on browser cells. */
+  maxBrowserCells: number;
   rules: string[];
 }
 
@@ -178,6 +184,9 @@ export const PRODUCTS: Record<ProductId, ProductConfig> = {
     gmailQuery: '{subject:"[Muse] Spec" subject:"Muse Inflecto test"}',
     subjectPrefixes: ['[Muse] Spec', 'Muse Inflecto test'],
     capabilities: RUNNER_CAPABILITIES,
+    maxMcpCalls: 30, // 35 - 5 exploratory
+    maxMcpCallsRetestOnly: 35,
+    maxBrowserCells: 2,
     rules: [
       'password login at /login/team only',
       'no forms that send email',
@@ -202,6 +211,9 @@ export const PRODUCTS: Record<ProductId, ProductConfig> = {
     gmailQuery: 'subject:"[Muse] Spec Sendinel"',
     subjectPrefixes: ['[Muse] Spec Sendinel'],
     capabilities: SENDINEL_CAPABILITIES,
+    maxMcpCalls: 55, // 60 - 5 exploratory
+    maxMcpCallsRetestOnly: 60,
+    maxBrowserCells: 3,
     rules: [
       'use ONLY the Muse sandbox project and the Muse test user; sandbox project only',
       'allowlisted targets only: never send to anyone outside the project allowlist',
@@ -591,8 +603,8 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
   const mode = openIssues.length > 15 ? 'RETEST_ONLY' : 'NORMAL';
 
   // Budget calculations
-  const maxMcpCalls = mode === 'RETEST_ONLY' ? 35 : 30; // 35 - 5 exploratory
-  const maxBrowserCells = 2;
+  const maxMcpCalls = mode === 'RETEST_ONLY' ? product.maxMcpCallsRetestOnly : product.maxMcpCalls;
+  const maxBrowserCells = product.maxBrowserCells;
   let usedMcpCalls = 0;
   let usedBrowserCells = 0;
   const chosenCellIds = new Set<string>();
