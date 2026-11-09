@@ -522,6 +522,15 @@ Install in the server user's crontab to replace session-only coordinator crons:
 17 * * * * cd ~/.claude/mcp-servers/gmail-mcp && HOME=$HOME npm run muse-watch
 ```
 
+Multi-product: `npm run muse-watch -- --product sendinel` (default `inflecto`) watches
+only hourly REPORT MISSING slots for subject `[Muse] Spec Sendinel`, with separate
+state in `~/.local/state/muse-watch/sendinel/state.json`; alerts read
+`SENDINEL · Muse ...`. Order/Ack checks stay with the Inflecto instance. Cron line:
+
+```cron
+27 * * * * cd ~/.claude/mcp-servers/gmail-mcp && HOME=$HOME npm run muse-watch -- --product sendinel
+```
+
 `npm test` includes injected read-only Gmail clients and fake Slack posters;
 tests do not send email or post to Slack.
 
@@ -587,3 +596,18 @@ if missing. If the generated brief matches the existing body except for the UTC 
 the update is skipped idempotently. The planner never comments on or closes issues, never
 sends email, and never posts to Slack. `--dry-run` writes nothing to disk or GitHub.
 
+### Multi-product (`--product`)
+
+`--product inflecto|sendinel` (default `inflecto`, identical to the original behavior)
+selects a config table: repo, matrix path, ledger path, report subject, TITLE prefix,
+brief label and Gmail query. Sendinel uses `kmdesle/sendinel-ai`, the ledger
+`~/.local/state/muse-planner/sendinel/ledger.json` (the Inflecto ledger is never read or
+written), and ONE pinned `muse-brief` issue titled `Muse brief: Sendinel coordinated testing`
+(found by title, otherwise created and pinned on `--apply`). Its brief restricts Muse to the
+sandbox project, allowlisted targets and no production account creation, and requires
+`Sendinel: ` TITLE prefixes. `muse-filer` already routes `[Muse] Spec Sendinel` emails to
+`kmdesle/sendinel-ai`. Cron line:
+
+```cron
+20 * * * * cd ~/.claude/mcp-servers/gmail-mcp && HOME=$HOME npm run muse-planner -- --product sendinel --apply
+```

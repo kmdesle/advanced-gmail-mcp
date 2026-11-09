@@ -104,6 +104,7 @@ export interface PlannerDeps {
   output?: (line: unknown) => void;
   repo?: string;
   account?: string;
+  product?: ProductId;
 }
 
 export interface PlannerResult {
@@ -124,23 +125,108 @@ export interface PlannerResult {
   state: PlannerState;
 }
 
-const DEFAULT_REPO = 'kmdesle/inflecto-ai';
 const DEFAULT_ACCOUNT = 'kevin@cyberwingman.ai';
-export const defaultStatePath = () => join(homedir(), '.local/state/muse-planner/ledger.json');
 
-export const RUNNER_CAPABILITIES = {
+export type Capabilities = Record<string, readonly string[]>;
+
+export const RUNNER_CAPABILITIES: Capabilities = {
   mcp: ['pro', 'premium'],
   browser: ['free', 'pro', 'premium'],
-} as const;
+};
 
-export function isCellRunnableByMuse(cell: MatrixCell): boolean {
-  const allowedTiers = RUNNER_CAPABILITIES[cell.surface as keyof typeof RUNNER_CAPABILITIES];
-  if (!allowedTiers) return false;
-  return (allowedTiers as readonly string[]).includes(cell.tier);
+export type ProductId = 'inflecto' | 'sendinel';
+
+export interface ProductConfig {
+  id: ProductId;
+  repo: string;
+  matrixPath: string;
+  /** Path relative to ~/.local/state/muse-planner */
+  ledgerRelPath: string;
+  /** Report email subject prefix; the run id is appended after a space. */
+  runSubjectPrefix: string;
+  titlePrefix: string;
+  titleExample: string;
+  briefLabel: string;
+  briefTitle: string;
+  /** Pin the brief issue when it is created (Sendinel only). */
+  pinBrief: boolean;
+  gmailQuery: string;
+  subjectPrefixes: string[];
+  capabilities: Capabilities;
+  rules: string[];
 }
 
-export function canSelectCell(cell: MatrixCell, entry: CellLedgerEntry | undefined, now: number): boolean {
-  if (!isCellRunnableByMuse(cell)) {
+export const PRODUCTS: Record<ProductId, ProductConfig> = {
+  inflecto: {
+    id: 'inflecto',
+    repo: 'kmdesle/inflecto-ai',
+    matrixPath: 'docs/qa/muse-coverage-matrix.json',
+    ledgerRelPath: 'ledger.json',
+    runSubjectPrefix: '[Muse] Spec Inflecto',
+    titlePrefix: 'Inflecto: ',
+    titleExample: 'get_location_brief cannot geocode ...',
+    briefLabel: 'muse-brief',
+    briefTitle: 'Muse next-run brief (auto-generated, do not edit)',
+    pinBrief: false,
+    gmailQuery: '{subject:"[Muse] Spec" subject:"Muse Inflecto test"}',
+    subjectPrefixes: ['[Muse] Spec', 'Muse Inflecto test'],
+    capabilities: RUNNER_CAPABILITIES,
+    rules: [
+      'password login at /login/team only',
+      'no forms that send email',
+      'never Create key',
+      'never checkout/Stripe/portal',
+      'no early-access form',
+      'quote visible strings exactly with a screenshot',
+      'desktop only (mobile is covered elsewhere)',
+    ],
+  },
+  sendinel: {
+    id: 'sendinel',
+    repo: 'kmdesle/sendinel-ai',
+    matrixPath: 'docs/qa/muse-coverage-matrix.json',
+    ledgerRelPath: 'sendinel/ledger.json',
+    runSubjectPrefix: '[Muse] Spec Sendinel',
+    titlePrefix: 'Sendinel: ',
+    titleExample: 'campaign preview shows the wrong sender ...',
+    briefLabel: 'muse-brief',
+    briefTitle: 'Muse brief: Sendinel coordinated testing',
+    pinBrief: true,
+    gmailQuery: 'subject:"[Muse] Spec Sendinel"',
+    subjectPrefixes: ['[Muse] Spec Sendinel'],
+    capabilities: RUNNER_CAPABILITIES,
+    rules: [
+      'use ONLY the Muse sandbox project and the Muse test user; sandbox project only',
+      'allowlisted targets only: never send to anyone outside the project allowlist',
+      'no prod account creation: never create accounts on production hosts',
+      'never checkout/Stripe/portal',
+      'quote visible strings exactly with a screenshot',
+      'desktop only (mobile is covered elsewhere)',
+    ],
+  },
+};
+
+export function getProduct(id: string | undefined): ProductConfig {
+  const product = PRODUCTS[(id ?? 'inflecto') as ProductId];
+  if (!product || !Object.hasOwn(PRODUCTS, id ?? 'inflecto')) {
+    throw new Error(`Unknown product: ${id}`);
+  }
+  return product;
+}
+
+export const stateDir = () => join(homedir(), '.local/state/muse-planner');
+export const productStatePath = (product: ProductConfig) => join(stateDir(), product.ledgerRelPath);
+export const defaultStatePath = () => productStatePath(PRODUCTS.inflecto);
+
+export function isCellRunnableByMuse(cell: MatrixCell, capabilities: Capabilities = RUNNER_CAPABILITIES): boolean {
+  if (!Object.hasOwn(capabilities, cell.surface)) return false;
+  const allowedTiers = capabilities[cell.surface];
+  if (!allowedTiers) return false;
+  return allowedTiers.includes(cell.tier);
+}
+
+export function canSelectCell(cell: MatrixCell, entry: CellLedgerEntry | undefined, now: number, capabilities: Capabilities = RUNNER_CAPABILITIES): boolean {
+  if (!isCellRunnableByMuse(cell, capabilities)) {
     return false;
   }
   if (!entry) {
@@ -258,7 +344,9 @@ export function generateBriefText(opts: {
   dailyWalkCells: MatrixCell[];
   weeklyCells: MatrixCell[];
   coverageRule: string;
+  product?: ProductConfig;
 }): string {
+  const product = opts.product ?? PRODUCTS.inflecto;
   const openIssuesList = opts.openIssues.length > 0
     ? opts.openIssues
         .sort((a, b) => a.number - b.number)
@@ -285,19 +373,13 @@ export function generateBriefText(opts: {
   }
 
   sections.push(`## RULES
-- password login at /login/team only
-- no forms that send email
-- never Create key
-- never checkout/Stripe/portal
-- no early-access form
-- quote visible strings exactly with a screenshot
-- desktop only (mobile is covered elsewhere)
+${product.rules.map(r => `- ${r}`).join('\n')}
 - do not re-report issues already open:
 ${openIssuesList}`);
 
   sections.push(`## REPORT FORMAT
-one email titled '[Muse] Spec Inflecto ${opts.runId}' to kevin@cyberwingman.ai from the personal Gmail, FINDINGS in TITLE/REPRO/EXPECTED/ACTUAL/EVIDENCE/SEVERITY blocks (zero findings is fine: send the email anyway), then a COVERAGE section per matrix coverage_rule.
-Start every finding's TITLE line with "Inflecto: " (example: \`TITLE: Inflecto: get_location_brief cannot geocode ...\`).
+one email titled '${product.runSubjectPrefix} ${opts.runId}' to kevin@cyberwingman.ai from the personal Gmail, FINDINGS in TITLE/REPRO/EXPECTED/ACTUAL/EVIDENCE/SEVERITY blocks (zero findings is fine: send the email anyway), then a COVERAGE section per matrix coverage_rule.
+Start every finding's TITLE line with "${product.titlePrefix}" (example: \`TITLE: ${product.titlePrefix}${product.titleExample}\`).
 
 Coverage rule:
 ${opts.coverageRule}`);
@@ -305,7 +387,7 @@ ${opts.coverageRule}`);
   return sections.join('\n\n') + '\n';
 }
 
-export function computeScoreboard(cells: MatrixCell[], ledger: Record<string, CellLedgerEntry>, now: number): Scoreboard {
+export function computeScoreboard(cells: MatrixCell[], ledger: Record<string, CellLedgerEntry>, now: number, capabilities: Capabilities = RUNNER_CAPABILITIES): Scoreboard {
   const sevenDaysAgo = now - 7 * 24 * 3600 * 1000;
   let passed7d = 0;
   let fails = 0;
@@ -315,7 +397,7 @@ export function computeScoreboard(cells: MatrixCell[], ledger: Record<string, Ce
   let stuckBlocked = 0;
 
   for (const cell of cells) {
-    if (!isCellRunnableByMuse(cell)) {
+    if (!isCellRunnableByMuse(cell, capabilities)) {
       notRunnable++;
     }
     const entry = ledger[cell.id];
@@ -347,13 +429,13 @@ export function computeScoreboard(cells: MatrixCell[], ledger: Record<string, Ce
   };
 }
 
-async function scanGmail(gmail: ReadonlyPlannerGmail, account: string): Promise<MuseMail[]> {
+async function scanGmail(gmail: ReadonlyPlannerGmail, product: ProductConfig): Promise<MuseMail[]> {
   const ids = new Set<string>();
   let pageToken: string | undefined;
   do {
     const { data } = await gmail.users.messages.list({
       userId: 'me',
-      q: '{subject:"[Muse] Spec" subject:"Muse Inflecto test"}',
+      q: product.gmailQuery,
       maxResults: 500,
       pageToken,
     });
@@ -369,7 +451,7 @@ async function scanGmail(gmail: ReadonlyPlannerGmail, account: string): Promise<
     if (data.labelIds?.some(l => ['SPAM', 'TRASH'].includes(l))) continue;
     const header = (name: string) => data.payload?.headers?.find(h => h.name?.toLowerCase() === name)?.value ?? '';
     const subject = header('subject');
-    if (!subject.startsWith('[Muse] Spec') && !subject.startsWith('Muse Inflecto test')) {
+    if (!product.subjectPrefixes.some(prefix => subject.startsWith(prefix))) {
       continue;
     }
     const time = Number(data.internalDate) || Date.parse(header('date')) || 0;
@@ -387,8 +469,8 @@ async function scanGmail(gmail: ReadonlyPlannerGmail, account: string): Promise<
   return mails;
 }
 
-async function fetchMatrix(gh: Gh, repo: string): Promise<Matrix> {
-  const stdout = await gh(['api', `repos/${repo}/contents/docs/qa/muse-coverage-matrix.json`, '--jq', '.content']);
+async function fetchMatrix(gh: Gh, repo: string, matrixPath: string): Promise<Matrix> {
+  const stdout = await gh(['api', `repos/${repo}/contents/${matrixPath}`, '--jq', '.content']);
   let text = stdout.trim();
   try {
     const decoded = Buffer.from(text, 'base64').toString('utf8');
@@ -406,19 +488,39 @@ async function fetchMuseTestIssues(gh: Gh, repo: string): Promise<GitHubIssue[]>
   return (stdout.trim() ? JSON.parse(stdout) : []) as GitHubIssue[];
 }
 
-export function parseArgs(args: string[]): { apply: boolean } {
-  if (args.some(arg => !['--apply', '--dry-run'].includes(arg)) || (args.includes('--apply') && args.includes('--dry-run'))) {
-    throw new Error('Usage: muse-planner [--dry-run | --apply]');
+const USAGE = 'Usage: muse-planner [--dry-run | --apply] [--product inflecto|sendinel]';
+
+export function parsePlannerArgs(args: string[]): { apply: boolean; product: ProductId } {
+  const flags: string[] = [];
+  let product: string = 'inflecto';
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--product') {
+      product = args[++i] ?? '';
+    } else if (arg.startsWith('--product=')) {
+      product = arg.slice('--product='.length);
+    } else {
+      flags.push(arg);
+    }
   }
-  return { apply: args.includes('--apply') };
+  if (flags.some(arg => !['--apply', '--dry-run'].includes(arg)) || (flags.includes('--apply') && flags.includes('--dry-run'))
+    || !Object.hasOwn(PRODUCTS, product)) {
+    throw new Error(USAGE);
+  }
+  return { apply: flags.includes('--apply'), product: product as ProductId };
+}
+
+export function parseArgs(args: string[]): { apply: boolean } {
+  return { apply: parsePlannerArgs(args).apply };
 }
 
 export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
   const now = deps.now ?? Date.now();
   const runId = new Date(now).toISOString();
-  const repo = deps.repo ?? DEFAULT_REPO;
-  const account = deps.account ?? DEFAULT_ACCOUNT;
-  const statePath = deps.statePath ?? defaultStatePath();
+  const product = getProduct(deps.product);
+  const caps = product.capabilities;
+  const repo = deps.repo ?? product.repo;
+  const statePath = deps.statePath ?? productStatePath(product);
   const apply = deps.apply ?? false;
 
   let state: PlannerState;
@@ -439,7 +541,7 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
   }
 
   // 1. Fetch matrix
-  const matrix = await fetchMatrix(deps.gh, repo);
+  const matrix = await fetchMatrix(deps.gh, repo, product.matrixPath);
   const validCellIds = new Set(matrix.cells.map(c => c.id));
 
   // Initialize cells in ledger if missing
@@ -458,7 +560,7 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
 
   // 2. Fetch Gmail messages
   const gmail = typeof deps.gmail === 'function' ? await deps.gmail() : deps.gmail;
-  const mails = await scanGmail(gmail, account);
+  const mails = await scanGmail(gmail, product);
   const unprocessedMails = mails
     .filter(m => !state.processed_message_ids.includes(m.id))
     .sort((a, b) => a.time - b.time);
@@ -507,7 +609,7 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
   const retestCells: MatrixCell[] = [];
   for (const cell of matrix.cells) {
     const entry = state.cells[cell.id];
-    if (!canSelectCell(cell, entry, now)) continue;
+    if (!canSelectCell(cell, entry, now, caps)) continue;
     const lastRunMs = entry?.last_run ? Date.parse(entry.last_run) : null;
     const shouldRetest = cell.guards && cell.guards.some(guardNum => {
       const closedAt = closedMap.get(guardNum);
@@ -531,7 +633,7 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
   const smokeCells: MatrixCell[] = [];
   for (const cell of matrix.cells) {
     const entry = state.cells[cell.id];
-    if (!canSelectCell(cell, entry, now)) continue;
+    if (!canSelectCell(cell, entry, now, caps)) continue;
     if (cell.smoke && !chosenCellIds.has(cell.id)) {
       smokeCells.push(cell);
       chosenCellIds.add(cell.id);
@@ -549,7 +651,7 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
     if (canDailyWalk) {
       for (const cell of matrix.cells) {
         const entry = state.cells[cell.id];
-        if (!canSelectCell(cell, entry, now)) continue;
+        if (!canSelectCell(cell, entry, now, caps)) continue;
         if (cell.surface === 'browser' && !chosenCellIds.has(cell.id)) {
           dailyWalkCells.push(cell);
           chosenCellIds.add(cell.id);
@@ -564,7 +666,7 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
     if (isSundayHst) {
       for (const cell of matrix.cells) {
         const entry = state.cells[cell.id];
-        if (!canSelectCell(cell, entry, now)) continue;
+        if (!canSelectCell(cell, entry, now, caps)) continue;
         if (cell.weekly && !chosenCellIds.has(cell.id)) {
           if (usedMcpCalls + cell.est_mcp_calls <= maxMcpCalls) {
             if (cell.surface !== 'browser' || usedBrowserCells < maxBrowserCells || canDailyWalk) {
@@ -579,7 +681,7 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
     }
 
     // (c) FILL: cells never run first, then cells whose last_result is FAIL or BLOCKED, then stalest by last_run
-    const remaining = matrix.cells.filter(c => !chosenCellIds.has(c.id) && canSelectCell(c, state.cells[c.id], now));
+    const remaining = matrix.cells.filter(c => !chosenCellIds.has(c.id) && canSelectCell(c, state.cells[c.id], now, caps));
     remaining.sort((a, b) => {
       const aEntry = state.cells[a.id];
       const bEntry = state.cells[b.id];
@@ -620,10 +722,11 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
     dailyWalkCells,
     weeklyCells,
     coverageRule: matrix.coverage_rule,
+    product,
   });
 
   // Scoreboard
-  const scoreboard = computeScoreboard(matrix.cells, state.cells, now);
+  const scoreboard = computeScoreboard(matrix.cells, state.cells, now, caps);
   state.scoreboard = scoreboard;
   const notRunnableCount = scoreboard.not_runnable ?? 0;
   const stuckBlockedCount = scoreboard.stuck_blocked ?? 0;
@@ -634,8 +737,12 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
   deps.output?.({ type: 'scoreboard', ...scoreboard, scoreboard_line });
 
   // Handle target issue
-  const targetStdout = await deps.gh(['issue', 'list', '--repo', repo, '--label', 'muse-brief', '--state', 'open', '--json', 'number,title,body']);
-  const openTargetIssues = (targetStdout.trim() ? JSON.parse(targetStdout) : []) as GitHubIssue[];
+  const targetStdout = await deps.gh(['issue', 'list', '--repo', repo, '--label', product.briefLabel, '--state', 'open', '--json', 'number,title,body']);
+  const foundTargetIssues = (targetStdout.trim() ? JSON.parse(targetStdout) : []) as GitHubIssue[];
+  // Sendinel keeps ONE brief issue: prefer the exact title, never any other open muse-brief issue first.
+  const openTargetIssues = product.pinBrief
+    ? foundTargetIssues.filter(i => i.title === product.briefTitle)
+    : foundTargetIssues;
 
   let targetIssueResult: { number: number; action: 'created' | 'edited' | 'skipped' | 'would_create' | 'would_edit' };
 
@@ -658,23 +765,30 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
     if (apply) {
       const labelStdout = await deps.gh(['label', 'list', '--repo', repo, '--json', 'name']);
       const labels = (labelStdout.trim() ? JSON.parse(labelStdout) : []) as { name: string }[];
-      if (!labels.some(l => l.name === 'muse-brief')) {
-        await deps.gh(['label', 'create', 'muse-brief', '--repo', repo, '--color', '0e8a16', '--description', 'Active hourly testing brief for Muse']);
+      if (!labels.some(l => l.name === product.briefLabel)) {
+        await deps.gh(['label', 'create', product.briefLabel, '--repo', repo, '--color', '0e8a16', '--description', 'Active hourly testing brief for Muse']);
       }
       const createStdout = await deps.gh([
         'issue', 'create',
         '--repo', repo,
-        '--title', 'Muse next-run brief (auto-generated, do not edit)',
-        '--label', 'muse-brief',
+        '--title', product.briefTitle,
+        '--label', product.briefLabel,
         '--body', brief,
       ]);
       const issueNum = Number(createStdout.match(/\/issues\/(\d+)/)?.[1]) || Number(createStdout.trim()) || 0;
       console.log(`Created target issue #${issueNum}`);
+      if (product.pinBrief && issueNum) {
+        try {
+          await deps.gh(['issue', 'pin', String(issueNum), '--repo', repo]);
+        } catch {
+          console.warn(`Could not pin brief issue #${issueNum}; pin it manually`);
+        }
+      }
       targetIssueResult = { number: issueNum, action: 'created' };
       deps.output?.({ action: 'created', issue: issueNum });
     } else {
       targetIssueResult = { number: 0, action: 'would_create' };
-      deps.output?.({ would_create: { title: 'Muse next-run brief (auto-generated, do not edit)', label: 'muse-brief' } });
+      deps.output?.({ would_create: { title: product.briefTitle, label: product.briefLabel } });
     }
   }
 
@@ -704,12 +818,20 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
 }
 
 async function main() {
-  const { apply } = parseArgs(process.argv.slice(2));
-  const file = defaultStatePath();
+  const { apply, product: productId } = parsePlannerArgs(process.argv.slice(2));
+  const product = getProduct(productId);
+  const file = productStatePath(product);
   const dir = dirname(file);
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  const lockPath = join(dir, 'run.lock');
-  const lock = await open(lockPath, 'wx', 0o600);
+  // Inflecto keeps its historical lock behavior; other products take no lock
+  // (and create no directories) in a dry run so a preview writes nothing.
+  const useLock = apply || product.id === 'inflecto';
+  let lock: Awaited<ReturnType<typeof open>> | undefined;
+  let lockPath = '';
+  if (useLock) {
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    lockPath = join(dir, 'run.lock');
+    lock = await open(lockPath, 'wx', 0o600);
+  }
   try {
     const { getGmailClient } = await import('../gmail/client.js');
     const exec = promisify(execFile);
@@ -718,11 +840,14 @@ async function main() {
       gh,
       gmail: () => getGmailClient(DEFAULT_ACCOUNT),
       apply,
+      product: product.id,
       output: line => console.log(JSON.stringify(line)),
     });
   } finally {
-    await lock.close();
-    await unlink(lockPath);
+    if (lock) {
+      await lock.close();
+      await unlink(lockPath);
+    }
   }
 }
 
