@@ -24,7 +24,16 @@ interface Entry { active: boolean; detail: string }
 interface State { version: 1; checkedThrough: number; alerts: Record<string, Entry> }
 export interface Notice { key: string; color: 'amber' | 'green'; text: string }
 export type Poster = (notice: Notice) => Promise<void>;
-export const defaultStatePath = () => join(homedir(), '.local/state/muse-watch/state.json');
+export type WatchProduct = 'inflecto' | 'sendinel';
+export const WATCH_PRODUCTS: Record<WatchProduct, { label: string; reportSubject: RegExp; statePath: () => string; ordersAndAcks: boolean }> = {
+  inflecto: { label: 'INFLECTO', reportSubject: /^(?:Muse Inflecto test|\[Muse\] Spec)/, ordersAndAcks: true,
+    statePath: () => join(homedir(), '.local/state/muse-watch/state.json') },
+  // Orders/acks are not product-specific and are already watched by the Inflecto
+  // instance; Sendinel only watches its own hourly report slots.
+  sendinel: { label: 'SENDINEL', reportSubject: /^\[Muse\] Spec Sendinel\b/, ordersAndAcks: false,
+    statePath: () => join(homedir(), '.local/state/muse-watch/sendinel/state.json') },
+};
+export const defaultStatePath = () => WATCH_PRODUCTS.inflecto.statePath();
 const addresses = (value: string) => (value.toLowerCase().match(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+/g) ?? []);
 
 async function scan(gmail: ReadonlyMuseGmail): Promise<Mail[]> {
@@ -62,10 +71,12 @@ async function scan(gmail: ReadonlyMuseGmail): Promise<Mail[]> {
 
 export async function runMuseWatch(deps: {
   gmail: ReadonlyMuseGmail | (() => Promise<ReadonlyMuseGmail>); post: Poster; statePath?: string; now?: number;
-  dryRun?: boolean; output?: (notice: Notice) => void;
+  dryRun?: boolean; output?: (notice: Notice) => void; product?: WatchProduct;
 }): Promise<Notice[]> {
   const now = deps.now ?? Date.now();
-  const file = deps.statePath ?? defaultStatePath();
+  const product = WATCH_PRODUCTS[deps.product ?? 'inflecto'];
+  if (!product) throw new Error('Unknown product');
+  const file = deps.statePath ?? product.statePath();
   let state: State;
   let firstEvaluation = false;
   try {
@@ -83,7 +94,7 @@ export async function runMuseWatch(deps: {
     // Resolved keys are retained forever: an old slot/order never re-alerts.
     if (failing ? previous !== undefined : !previous?.active) return;
     const color = failing ? 'amber' : 'green';
-    const notice: Notice = { key, color, text: `${failing ? '🟡' : '🟢'} 🔮 INFLECTO · Muse ${failing ? detail : `recovered: ${previous!.detail}`} · ${key} → ${failing ? 'watch Muse mail' : 'no action'}` };
+    const notice: Notice = { key, color, text: `${failing ? '🟡' : '🟢'} 🔮 ${product.label} · Muse ${failing ? detail : `recovered: ${previous!.detail}`} · ${key} → ${failing ? 'watch Muse mail' : 'no action'}` };
     notices.push(notice);
     deps.output?.(notice);
     if (!deps.dryRun) await deps.post(notice);
@@ -106,7 +117,7 @@ export async function runMuseWatch(deps: {
   if (state.alerts.source?.active) await transition('source', false, 'Gmail source unknown');
   delete state.alerts.source;
   const incoming = mails.filter(m => m.to.includes(ACCOUNT) && m.from !== ACCOUNT && m.time <= now);
-  const reports = incoming.filter(m => /^(?:Muse Inflecto test|\[Muse\] Spec)/.test(m.subject));
+  const reports = incoming.filter(m => product.reportSubject.test(m.subject));
   const acks = incoming.filter(m => m.subject.startsWith('[Muse] Ack: '));
   const start = Math.floor(state.checkedThrough / (24 * HOUR)) * 24 * HOUR;
   for (let day = start; day <= now; day += 24 * HOUR) {
@@ -125,7 +136,7 @@ export async function runMuseWatch(deps: {
       }
     }
   }
-  const orders = mails.filter(m => [ACCOUNT, MUSE].includes(m.from) && m.to.includes(MUSE)
+  const orders = !product.ordersAndAcks ? [] : mails.filter(m => [ACCOUNT, MUSE].includes(m.from) && m.to.includes(MUSE)
     && (m.subject.startsWith('[Muse]') || m.museLabel)
     && !/^(?:Muse Inflecto test|\[Muse\] (?:Spec|Ack))/.test(m.subject) && m.time <= now);
   for (const order of orders) {
@@ -138,7 +149,7 @@ export async function runMuseWatch(deps: {
     }
     if (ack) await transition(key, false, order.subject);
   }
-  for (const ack of acks) {
+  for (const ack of product.ordersAndAcks ? acks : []) {
     if (!/Status:\s*HOLDING\b/i.test(ack.body)) continue;
     const key = `holding:${ack.id}`;
     const holding = ack.body.match(/Status:\s*HOLDING\b([\s\S]*)/i)?.[1] ?? '';
@@ -167,19 +178,31 @@ export function webhookPoster(config: Record<string, string>, log = console.warn
   };
 }
 
+export function parseWatchArgs(args: string[]): { dryRun: boolean; product: WatchProduct } {
+  let product = 'inflecto';
+  const flags: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--product') product = args[++i] ?? '';
+    else if (args[i].startsWith('--product=')) product = args[i].slice('--product='.length);
+    else flags.push(args[i]);
+  }
+  if (flags.some(arg => arg !== '--dry-run') || !Object.hasOwn(WATCH_PRODUCTS, product)) {
+    throw new Error('Usage: muse-watch [--dry-run] [--product inflecto|sendinel]');
+  }
+  return { dryRun: flags.includes('--dry-run'), product: product as WatchProduct };
+}
 export function parseArgs(args: string[]): boolean {
-  if (args.some(arg => arg !== '--dry-run')) throw new Error('Usage: muse-watch [--dry-run]');
-  return args.includes('--dry-run');
+  return parseWatchArgs(args).dryRun;
 }
 async function main() {
-  const dryRun = parseArgs(process.argv.slice(2));
-  const file = defaultStatePath();
+  const { dryRun, product } = parseWatchArgs(process.argv.slice(2));
+  const file = WATCH_PRODUCTS[product].statePath();
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   const lockPath = join(dirname(file), 'run.lock');
   const lock = await open(lockPath, 'wx', 0o600);
   try {
     const { getGmailClient } = await import('../gmail/client.js');
-    await runMuseWatch({ gmail: () => getGmailClient(ACCOUNT), dryRun,
+    await runMuseWatch({ gmail: () => getGmailClient(ACCOUNT), dryRun, product,
       // Load configuration lazily so previews need no Slack credentials.
       post: async notice => webhookPoster(parseWebhookConfig(await readFile(join(homedir(), '.config/desler/alerts.env'), 'utf8')))(notice),
       output: notice => console.log(JSON.stringify(notice)) });

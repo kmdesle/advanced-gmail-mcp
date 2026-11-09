@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { gmail_v1 } from 'googleapis';
-import { runMuseWatch, parseArgs, webhookPoster, type Notice, type ReadonlyMuseGmail } from '../src/alerts/muse-watch.js';
+import { runMuseWatch, parseArgs, parseWatchArgs, WATCH_PRODUCTS, webhookPoster, type Notice, type ReadonlyMuseGmail } from '../src/alerts/muse-watch.js';
 import { parseWebhookConfig } from '../src/alerts/watcher.js';
 
 const account = 'kevin@cyberwingman.ai';
@@ -218,4 +218,32 @@ test('hourly slots: missing report >2h raises REPORT MISSING, inside window does
     const slotHourStr = String(i).padStart(2, '0');
     assert.ok(allNotices.some(n => n.key === `slot:2026-11-09T${slotHourStr}:00:00.000Z` && n.color === 'amber'));
   }
+});
+
+test('--product sendinel: own state path, own subject slots, alerts name the product', async t => {
+  assert.deepEqual(parseWatchArgs([]), { dryRun: false, product: 'inflecto' });
+  assert.deepEqual(parseWatchArgs(['--product', 'sendinel', '--dry-run']), { dryRun: true, product: 'sendinel' });
+  assert.throws(() => parseWatchArgs(['--product', 'x']), /Usage/);
+  assert.notEqual(WATCH_PRODUCTS.sendinel.statePath(), WATCH_PRODUCTS.inflecto.statePath());
+  assert.match(WATCH_PRODUCTS.sendinel.statePath(), /muse-watch\/sendinel\/state\.json$/);
+
+  // An Inflecto report does not satisfy a Sendinel slot, and the alert names Sendinel.
+  const h = await harness(t, time('20:00'));
+  h.set([mail('r', '[Muse] Spec Inflecto hourly', time('22:15'))]);
+  const missing = await runMuseWatch({ gmail: h.gmail, post: async n => { h.posted.push(n); }, statePath: h.statePath, now: time('23:01'), product: 'sendinel' });
+  assert.equal(missing.length, 1);
+  assert.match(missing[0].text, /SENDINEL · Muse REPORT MISSING after 2026-11-08T21:00:00\.000Z/);
+  assert.doesNotMatch(missing[0].text, /INFLECTO/);
+
+  // The same Inflecto report satisfies the Inflecto slot, alert text unchanged.
+  const hi = await harness(t, time('20:00'));
+  hi.set([mail('r', '[Muse] Spec Inflecto hourly', time('22:15'))]);
+  assert.equal((await hi.run(time('23:01'))).length, 0);
+  const hi2 = await harness(t, time('20:00'));
+  assert.match((await hi2.run(time('23:01')))[0].text, /INFLECTO · Muse REPORT MISSING/);
+
+  // A Sendinel report satisfies the Sendinel slot, and recovers an earlier miss.
+  const hs = await harness(t, time('20:00'));
+  hs.set([mail('s', '[Muse] Spec Sendinel hourly', time('22:15'))]);
+  assert.equal((await runMuseWatch({ gmail: hs.gmail, post: async () => {}, statePath: hs.statePath, now: time('23:01'), product: 'sendinel' })).length, 0);
 });

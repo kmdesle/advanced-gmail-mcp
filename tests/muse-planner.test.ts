@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -10,6 +10,9 @@ import {
   computeScoreboard,
   runPlanner,
   parseArgs,
+  parsePlannerArgs,
+  getProduct,
+  PRODUCTS,
   RUNNER_CAPABILITIES,
   type Matrix,
   type MatrixCell,
@@ -112,6 +115,9 @@ function makeGh(opts: {
         state: 'OPEN',
       };
       return 'https://github.com/kmdesle/inflecto-ai/issues/4040\n';
+    }
+    if (args[0] === 'issue' && args[1] === 'pin') {
+      return '';
     }
     if (args[0] === 'issue' && args[1] === 'edit') {
       const bodyIdx = args.indexOf('--body');
@@ -691,4 +697,109 @@ Every Muse report ends with a COVERAGE section: one line per cell attempted, in 
 
   const briefWithoutPrefixLine = lines.filter(l => l !== prefixLine).join('\n');
   assert.equal(briefWithoutPrefixLine, expectedFixtureWithoutLine);
+});
+
+const FIXED_NOW = Date.parse('2026-11-08T12:00:00Z');
+const sendinelBriefTitle = 'Muse brief: Sendinel coordinated testing';
+
+test('15. --product selection, default inflecto, rejects unknown', () => {
+  assert.deepEqual(parsePlannerArgs([]), { apply: false, product: 'inflecto' });
+  assert.deepEqual(parsePlannerArgs(['--apply']), { apply: true, product: 'inflecto' });
+  assert.deepEqual(parsePlannerArgs(['--product', 'sendinel']), { apply: false, product: 'sendinel' });
+  assert.deepEqual(parsePlannerArgs(['--apply', '--product=sendinel']), { apply: true, product: 'sendinel' });
+  assert.throws(() => parsePlannerArgs(['--product', 'nope']), /Usage/);
+  assert.throws(() => parsePlannerArgs(['--product']), /Usage/);
+  assert.throws(() => parsePlannerArgs(['--product', '__proto__']), /Usage/);
+  assert.equal(getProduct(undefined).repo, 'kmdesle/inflecto-ai');
+  assert.equal(PRODUCTS.inflecto.ledgerRelPath, 'ledger.json');
+  assert.equal(PRODUCTS.sendinel.ledgerRelPath, 'sendinel/ledger.json');
+  assert.equal(PRODUCTS.sendinel.repo, 'kmdesle/sendinel-ai');
+});
+
+test('16. brief text per product', () => {
+  const base = {
+    runId: '2026-11-08T12:00:00.000Z',
+    mode: 'NORMAL' as const,
+    openIssues: [],
+    retestCells: [],
+    smokeCells: [makeCell('s-1', { smoke: true })],
+    fillCells: [],
+    dailyWalkCells: [],
+    weeklyCells: [],
+    coverageRule: 'rule',
+  };
+  const inflecto = generateBriefText(base);
+  assert.equal(generateBriefText({ ...base, product: PRODUCTS.inflecto }), inflecto);
+  assert.match(inflecto, /\[Muse\] Spec Inflecto 2026-11-08T12:00:00\.000Z/);
+  assert.match(inflecto, /password login at \/login\/team only/);
+  assert.doesNotMatch(inflecto, /Sendinel/);
+
+  const sendinel = generateBriefText({ ...base, product: PRODUCTS.sendinel });
+  assert.match(sendinel, /\[Muse\] Spec Sendinel 2026-11-08T12:00:00\.000Z/);
+  assert.match(sendinel, /Start every finding's TITLE line with "Sendinel: "/);
+  assert.match(sendinel, /sandbox project only/);
+  assert.match(sendinel, /allowlisted targets only/);
+  assert.match(sendinel, /no prod account creation/);
+  assert.doesNotMatch(sendinel, /Inflecto|login\/team/);
+});
+
+test('17. Sendinel run leaves the Inflecto ledger byte-identical and uses its own ledger, repo and pinned brief', async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), 'planner-test-'));
+  try {
+    const inflectoLedger = join(tmpDir, 'ledger.json');
+    const sendinelLedger = join(tmpDir, 'sendinel', 'ledger.json');
+    const original = '{"version":1,"processed_message_ids":["keep"],"cells":{}}\n';
+    await writeFile(inflectoLedger, original);
+
+    const matrix = makeMatrix([makeCell('sn-1', { smoke: true })]);
+    const { gh, calls } = makeGh({ matrix });
+    const res = await runPlanner({ gh, gmail: makeGmail([]), statePath: sendinelLedger, apply: true, product: 'sendinel', now: FIXED_NOW });
+
+    assert.equal(await readFile(inflectoLedger, 'utf8'), original);
+    assert.equal(JSON.parse(await readFile(sendinelLedger, 'utf8')).cells['sn-1'].runs, 0);
+    assert.equal(res.target_issue.action, 'created');
+
+    // Every gh call is against sendinel-ai; inflecto-ai is never touched.
+    const repoOf = (c: string[]) => c.includes('--repo') ? c[c.indexOf('--repo') + 1] : c[1];
+    for (const c of calls) {
+      const target = c.join(' ');
+      assert.doesNotMatch(target, /inflecto-ai/, target);
+      assert.match(target, /sendinel-ai/, target);
+      void repoOf;
+    }
+    const create = calls.find(c => c[0] === 'issue' && c[1] === 'create')!;
+    assert.equal(create[create.indexOf('--title') + 1], sendinelBriefTitle);
+    assert.equal(create[create.indexOf('--label') + 1], 'muse-brief');
+    const pin = calls.find(c => c[0] === 'issue' && c[1] === 'pin');
+    assert.deepEqual(pin, ['issue', 'pin', '4040', '--repo', 'kmdesle/sendinel-ai']);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('18. Sendinel finds the existing brief issue by title, edits it, never creates a second', async () => {
+  const matrix = makeMatrix([makeCell('sn-1', { smoke: true })]);
+  const { gh, calls } = makeGh({
+    matrix,
+    targetIssue: { number: 77, state: 'OPEN', title: sendinelBriefTitle, body: 'stale' },
+  });
+  const res = await runPlanner({ gh, gmail: makeGmail([]), apply: false, product: 'sendinel', now: FIXED_NOW, statePath: join(tmpdir(), 'does-not-exist-sendinel', 'ledger.json') });
+  assert.deepEqual(res.target_issue, { number: 77, action: 'would_edit' });
+  assert.equal(calls.some(c => c[0] === 'issue' && ['create', 'edit', 'pin'].includes(c[1])), false);
+});
+
+test('19. Sendinel dry run from a fixture matrix prints a Sendinel brief and writes nothing', async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), 'planner-test-'));
+  try {
+    const statePath = join(tmpDir, 'sendinel', 'ledger.json');
+    const matrix = makeMatrix([makeCell('sn-1', { smoke: true }), makeCell('sn-2')]);
+    const { gh, calls } = makeGh({ matrix, labels: [] });
+    const res = await runPlanner({ gh, gmail: makeGmail([]), statePath, apply: false, product: 'sendinel', now: FIXED_NOW });
+    assert.match(res.brief, /\[Muse\] Spec Sendinel /);
+    assert.equal(res.target_issue.action, 'would_create');
+    assert.deepEqual(await readdir(tmpDir), []);
+    assert.equal(calls.some(c => ['create', 'edit', 'pin'].includes(c[1])), false);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
 });

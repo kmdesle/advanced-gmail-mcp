@@ -729,3 +729,13 @@ EVIDENCE: Desktop browser, 1920px, screenshots captured in-run. Already open as 
   assert.equal(run.results[1].reason, '#2292, #2293');
   assert.deepEqual(h.marked, ['1a1bd699b692f001']);
 });
+
+test('unprefixed TITLE in a "[Muse] Spec Sendinel" email routes to kmdesle/sendinel-ai', async () => {
+  assert.deepEqual(routeTitle('Campaign preview shows wrong sender', '[Muse] Spec Sendinel 2026-11-08T20:50:02.318Z'),
+    { repo: 'kmdesle/sendinel-ai', title: '[muse] Campaign preview shows wrong sender' });
+  const body = 'TITLE: Campaign preview shows wrong sender\nREPRO: Open preview\nACTUAL: Wrong sender';
+  const run = await harness([mail(body, 'sn1', '[Muse] Spec Sendinel 2026-11-08T20:50:02.318Z')]).run();
+  assert.equal(run.planned.length, 1);
+  assert.equal(run.planned[0].repo, 'kmdesle/sendinel-ai');
+  assert.equal(run.planned[0].title, '[muse] Campaign preview shows wrong sender');
+});
