@@ -842,3 +842,57 @@ test('14. muse_runnable=false blocks a cell; inflecto behavior unchanged', () =>
   assert.equal(isCellRunnableByMuse(makeCell('i4', { surface: 'mcp', tier: 'pro', muse_runnable: true }), caps), true);
   assert.equal(isCellRunnableByMuse(makeCell('i5', { surface: 'mcp', tier: 'pro', muse_runnable: false }), caps), false);
 });
+
+// Mimics gh's real behavior: `label list` returns only 30 labels unless --limit is raised.
+function wrapGhLabels(inner: Gh, opts: { allLabels: { name: string }[]; createError?: string }) {
+  const calls: string[][] = [];
+  const gh: Gh = async args => {
+    calls.push(args);
+    if (args[0] === 'label' && args[1] === 'list') {
+      const li = args.indexOf('--limit');
+      const limit = li >= 0 ? Number(args[li + 1]) : 30;
+      return JSON.stringify(opts.allLabels.slice(0, limit));
+    }
+    if (args[0] === 'label' && args[1] === 'create' && opts.createError) {
+      throw new Error(opts.createError);
+    }
+    return inner(args);
+  };
+  return { gh, calls };
+}
+
+async function runWithMissingBrief(wrap: (inner: Gh) => { gh: Gh; calls: string[][] }) {
+  const tmpDir = await mkdtemp(join(tmpdir(), 'planner-test-'));
+  try {
+    const matrix = makeMatrix([makeCell('c1', { smoke: true })]);
+    const base = makeGh({ matrix });
+    const w = wrap(base.gh);
+    const res = await runPlanner({ gh: w.gh, gmail: makeGmail([]), statePath: join(tmpDir, 'ledger.json'), apply: true, now: FIXED_NOW });
+    return { res, calls: w.calls };
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+}
+
+test('20. label list passes --limit 1000 and does not create muse-brief when it is label #45 of 60', async () => {
+  const allLabels = Array.from({ length: 60 }, (_, i) => ({ name: i === 44 ? 'muse-brief' : `label-${i}` }));
+  const { res, calls } = await runWithMissingBrief(inner => wrapGhLabels(inner, { allLabels }));
+  const list = calls.find(c => c[0] === 'label' && c[1] === 'list')!;
+  assert.equal(list[list.indexOf('--limit') + 1], '1000');
+  assert.equal(calls.some(c => c[0] === 'label' && c[1] === 'create'), false);
+  assert.equal(res.target_issue.action, 'created');
+});
+
+test('21. "already exists" from label create does not abort the planner', async () => {
+  const { res, calls } = await runWithMissingBrief(inner =>
+    wrapGhLabels(inner, { allLabels: [], createError: 'label with name "muse-brief" already exists; use `--force` to update' }));
+  assert.equal(calls.some(c => c[0] === 'label' && c[1] === 'create'), true);
+  assert.equal(res.target_issue.action, 'created');
+});
+
+test('22. other label create errors still abort', async () => {
+  await assert.rejects(
+    runWithMissingBrief(inner => wrapGhLabels(inner, { allLabels: [], createError: 'HTTP 403: forbidden' })),
+    /403/,
+  );
+});

@@ -771,10 +771,15 @@ export async function runPlanner(deps: PlannerDeps): Promise<PlannerResult> {
   } else {
     // Target issue missing
     if (apply) {
-      const labelStdout = await deps.gh(['label', 'list', '--repo', repo, '--json', 'name']);
+      const labelStdout = await deps.gh(['label', 'list', '--repo', repo, '--limit', '1000', '--json', 'name']);
       const labels = (labelStdout.trim() ? JSON.parse(labelStdout) : []) as { name: string }[];
       if (!labels.some(l => l.name === product.briefLabel)) {
-        await deps.gh(['label', 'create', product.briefLabel, '--repo', repo, '--color', '0e8a16', '--description', 'Active hourly testing brief for Muse']);
+        try {
+          await deps.gh(['label', 'create', product.briefLabel, '--repo', repo, '--color', '0e8a16', '--description', 'Active hourly testing brief for Muse']);
+        } catch (err) {
+          // Label exists but was not in the list (race or list truncation): treat as success.
+          if (!/already exists/i.test(err instanceof Error ? err.message : String(err))) throw err;
+        }
       }
       const createStdout = await deps.gh([
         'issue', 'create',
