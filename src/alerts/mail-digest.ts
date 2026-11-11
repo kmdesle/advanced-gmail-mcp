@@ -78,6 +78,60 @@ function mailbox(from: string): string {
 
 function oneLine(value: string): string { return value.replace(/[\x00-\x1f\x7f\s]+/g, ' ').trim(); }
 
+export type DigestIgnorePattern = { kind: 'address' | 'domain' | 'subject'; value: string };
+
+export function parseDigestIgnorePatterns(value: string): DigestIgnorePattern[] {
+  const patterns: DigestIgnorePattern[] = [];
+  for (const raw of value.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (line.toLowerCase().startsWith('subject:')) {
+      const prefix = line.slice('subject:'.length).trim();
+      if (prefix) patterns.push({ kind: 'subject', value: prefix.toLowerCase() });
+    } else if (line.startsWith('@')) {
+      const domain = line.slice(1).toLowerCase();
+      if (!domain || !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(domain)) {
+        throw new Error(`Invalid mail-digest ignore domain: ${line}`);
+      }
+      patterns.push({ kind: 'domain', value: domain });
+    } else {
+      if (!addressPattern.test(line)) throw new Error(`Invalid mail-digest ignore address: ${line}`);
+      patterns.push({ kind: 'address', value: line.toLowerCase() });
+    }
+  }
+  return patterns;
+}
+
+export async function loadDigestIgnorePatterns(path = join(homedir(), '.config/mail-digest/ignore.txt')): Promise<DigestIgnorePattern[]> {
+  let value: string;
+  try { value = await readFile(path, 'utf8'); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  return parseDigestIgnorePatterns(value);
+}
+
+function ignoredByLocalPatterns(from: string, subject: string, patterns: DigestIgnorePattern[]): boolean {
+  const email = mailbox(from);
+  const domain = email.split('@')[1] ?? '';
+  const normalizedSubject = subject.toLowerCase();
+  return patterns.some(pattern => pattern.kind === 'address' ? email === pattern.value
+    : pattern.kind === 'domain' ? domain === pattern.value || domain.endsWith(`.${pattern.value}`)
+      : normalizedSubject.startsWith(pattern.value));
+}
+
+function decodeHtmlEntities(value: string): string {
+  const named: Record<string, string> = { amp: '&', apos: "'", quot: '"', lt: '<', gt: '>', nbsp: '\u00a0' };
+  return value.replace(/&(#(?:x[\da-f]+|\d+)|[a-z][a-z\d]+);/gi, (entity, key: string) => {
+    if (key[0] !== '#') return named[key.toLowerCase()] ?? entity;
+    const hex = key[1]?.toLowerCase() === 'x';
+    const point = Number.parseInt(key.slice(hex ? 2 : 1), hex ? 16 : 10);
+    if (!Number.isInteger(point) || point < 0 || point > 0x10ffff || (point >= 0xd800 && point <= 0xdfff)) return '\ufffd';
+    return String.fromCodePoint(point);
+  });
+}
+
 // Sender classification is conservative and heuristic; headers cannot prove a person.
 export function isPersonMessage(message: gmail_v1.Schema$Message): boolean {
   const from = header(message, 'From');
@@ -94,6 +148,7 @@ export function isPersonMessage(message: gmail_v1.Schema$Message): boolean {
 
 export function threadForDigest(
   thread: gmail_v1.Schema$Thread, account: string, owners: Set<string>, rules: Rule[], since: number, until: number,
+  ignorePatterns: DigestIgnorePattern[] = [],
 ): DigestThread | undefined {
   const messages = (thread.messages ?? []).filter(m => !m.labelIds?.includes('DRAFT'));
   if (!messages.length) return;
@@ -104,12 +159,13 @@ export function threadForDigest(
   const latest = messages.reduce((a, b) => Number(a.internalDate) > Number(b.internalDate) ? a : b);
   const time = Number(latest.internalDate);
   const from = header(latest, 'From');
-  const subject = header(latest, 'Subject');
+  const subject = decodeHtmlEntities(header(latest, 'Subject'));
   if (time <= since || time > until || owners.has(mailbox(from)) || !isPersonMessage(latest)
-    || /\[Muse\]/i.test(subject) || rules.some(rule => matchesRule(rule, account, from, subject))) return;
+    || /\[Muse\]/i.test(subject) || rules.some(rule => matchesRule(rule, account, from, subject))
+    || ignoredByLocalPatterns(from, subject, ignorePatterns)) return;
   if (!thread.id) throw new Error('Thread has no id');
   return { id: thread.id, from: oneLine(from), subject: oneLine(subject) || '(no subject)', time,
-    snippet: oneLine(latest.snippet ?? '').slice(0, 320) };
+    snippet: oneLine(decodeHtmlEntities(latest.snippet ?? '')).slice(0, 320) };
 }
 
 export function formatHonolulu(time: number): string {
@@ -136,9 +192,10 @@ export function renderDigest(groups: DigestGroup[], now: number): DigestEmail {
 
 export async function collectDigest(options: {
   accounts: AccountConfig[]; config: DigestConfig; rules: Rule[]; since: number; now: number;
+  ignorePatterns?: DigestIgnorePattern[];
   client: (account: AccountConfig) => Promise<ReadonlyDigestGmail>;
 }): Promise<DigestGroup[]> {
-  const { accounts, config, rules, since, now, client } = options;
+  const { accounts, config, rules, since, now, client, ignorePatterns = [] } = options;
   const owners = new Set(accounts.map(a => address(a.email)));
   const clients = new Map<AccountConfig, ReadonlyDigestGmail>();
   // Include aliases from skipped accounts too: a reply from any owned identity closes a thread.
@@ -175,7 +232,7 @@ export async function collectDigest(options: {
         if ((e.response?.status ?? e.code) === 404) continue;
         throw error;
       }
-      const thread = threadForDigest(data, account.alias, owners, rules, since, now);
+      const thread = threadForDigest(data, account.alias, owners, rules, since, now, ignorePatterns);
       if (thread) threads.push(thread);
     }
     threads.sort((a, b) => b.time - a.time);
@@ -214,6 +271,7 @@ export async function loadDigestRules(path: string): Promise<Rule[]> {
 
 export async function runDigest(options: {
   config: DigestConfig; accounts: AccountConfig[]; rules: Rule[];
+  ignorePatterns?: DigestIgnorePattern[]; ignoreFilePath?: string;
   client: (account: AccountConfig) => Promise<ReadonlyDigestGmail>;
   sendClient: (account: AccountConfig) => Promise<DigestSendGmail>;
   send?: boolean; stateDirectory?: string; now?: number; output?: (text: string) => void;
@@ -240,7 +298,8 @@ export async function runDigest(options: {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
-    const groups = await collectDigest({ ...options, since, now });
+    const ignorePatterns = options.ignorePatterns ?? await loadDigestIgnorePatterns(options.ignoreFilePath);
+    const groups = await collectDigest({ ...options, ignorePatterns, since, now });
     const email = renderDigest(groups, now);
     if (options.send) {
       await sendDigest(config, config.to, email, () => options.sendClient(sender));

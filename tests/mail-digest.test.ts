@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, test } from 'node:test';
 import type { gmail_v1 } from 'googleapis';
 import {
-  collectDigest, formatHonolulu, isPersonMessage, loadDigestRules, parseDigestArgs, parseDigestConfig,
+  collectDigest, formatHonolulu, isPersonMessage, loadDigestIgnorePatterns, loadDigestRules, parseDigestArgs, parseDigestConfig,
   renderDigest, runDigest, sendDigest, threadForDigest,
   type DigestEmail, type DigestSendGmail, type ReadonlyDigestGmail,
 } from '../src/alerts/mail-digest.js';
@@ -35,8 +35,9 @@ function message(from = 'Contributor <sender@example.invalid>', time = now - 60_
       .filter(h => !headers.some(override => override.name.toLowerCase() === h.name.toLowerCase())).concat(headers) } };
 }
 function thread(messages = [message()], id = 'thread-1'): gmail_v1.Schema$Thread { return { id, messages }; }
-function candidate(messages: gmail_v1.Schema$Message[], owners = new Set([source.email]), rules = [rule]) {
-  return threadForDigest(thread(messages), source.alias, owners, rules, since, now);
+function candidate(messages: gmail_v1.Schema$Message[], owners = new Set([source.email]), rules = [rule],
+  ignorePatterns: import('../src/alerts/mail-digest.js').DigestIgnorePattern[] = []) {
+  return threadForDigest(thread(messages), source.alias, owners, rules, since, now, ignorePatterns);
 }
 
 function fake(threads = [thread()], aliases: string[] = []) {
@@ -100,6 +101,9 @@ test('person heuristic accepts human mail and excludes automated local parts, se
     'postmaster', 'bounce', 'newsletter', 'automated', 'alerts', 'receipts', 'build-bot', 'github', 'slack', 'vercel', 'supabase', 'stripe']) {
     assert.equal(isPersonMessage(message(`${local}@example.invalid`)), false, local);
   }
+  for (const local of ['NOREPLY', 'No-Reply', 'Notifications', 'Notification', 'Mailer-Daemon', 'alerts']) {
+    assert.equal(isPersonMessage(message(`${local}+tag@example.invalid`)), false, local);
+  }
   for (const service of ['github', 'slack', 'vercel', 'supabase', 'stripe']) {
     assert.equal(isPersonMessage(message(`updates@${service}.example.invalid`)), false, service);
     assert.equal(isPersonMessage(message(`${service} <updates@example.invalid>`)), false, service);
@@ -129,6 +133,41 @@ test('latest received message wins regardless of array order, subject Date heade
   assert.equal(candidate([draft]), undefined);
   assert.equal(candidate([]), undefined);
   assert.throws(() => candidate([{ ...human, internalDate: 'invalid' }]), /received time/);
+});
+
+test('ignore patterns match exact addresses, domains and subject prefixes case-insensitively', () => {
+  const patterns = [
+    { kind: 'address' as const, value: 'alerts@example.invalid' },
+    { kind: 'domain' as const, value: 'mail.example.invalid' },
+    { kind: 'subject' as const, value: 'successfully published' },
+  ];
+  assert.equal(candidate([message('alerts@example.invalid')], new Set(), [], patterns), undefined);
+  assert.equal(candidate([message('sender@sub.mail.example.invalid')], new Set(), [], patterns), undefined);
+  assert.equal(candidate([message(undefined, undefined, [{ name: 'Subject', value: 'Successfully Published package' }])], new Set(), [], patterns), undefined);
+  assert.ok(candidate([message('sender@example.invalid')], new Set(), [], patterns));
+});
+
+test('ignore file parser and loader handle all pattern kinds, comments and missing file', async () => {
+  const dir = await scratch();
+  const path = join(dir, 'ignore.txt');
+  assert.deepEqual(await loadDigestIgnorePatterns(path), []);
+  await writeFile(path, '# local exclusions\nalerts@example.invalid\n@mail.example.invalid\nsubject:Successfully published\n');
+  assert.deepEqual(await loadDigestIgnorePatterns(path), [
+    { kind: 'address', value: 'alerts@example.invalid' },
+    { kind: 'domain', value: 'mail.example.invalid' },
+    { kind: 'subject', value: 'successfully published' },
+  ]);
+});
+
+test('decodes named and numeric HTML entities in subjects and snippets', () => {
+  const sourceMessage = message(undefined, now - 1_000, [
+    { name: 'Subject', value: 'It&#39;s &quot;ready&quot; &amp; done' },
+  ]);
+  sourceMessage.snippet = 'It&#39;s &amp; &#34;ready&#34;';
+  const item = candidate([sourceMessage])!;
+  const rendered = renderDigest([{ account: source, threads: [item] }], now);
+  assert.match(rendered.body, /Subject: It's "ready" & done/);
+  assert.match(rendered.body, /It's & "ready"/);
 });
 
 test('excludes Muse, automated mail, owner aliases, stale activity, future activity, and watcher rule matches', () => {

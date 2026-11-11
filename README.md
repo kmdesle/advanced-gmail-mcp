@@ -59,6 +59,12 @@ entries, and Pacific/Honolulu times with am/pm. Subject periods use Honolulu tim
 AM before 11 am, Midday from 11 am to before 2 pm, and PM thereafter. Cron setup,
 replying, and personal-mail handling are outside this feature's scope.
 
+Optional local exclusions go in `~/.config/mail-digest/ignore.txt`, one per line:
+a full sender address, `@domain`, or `subject:<prefix>`. Blank lines and lines
+starting with `#` are ignored. A missing file adds no exclusions; matched sender
+addresses/domains and subject prefixes are case-insensitive. Subjects and snippets
+have common HTML entities decoded before they appear in the digest.
+
 ## Features
 
 - **Gmail and Google Calendar** on one server and one token store per Google account
