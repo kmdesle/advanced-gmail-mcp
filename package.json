@@ -9,12 +9,13 @@
     "start": "tsx src/server.ts",
     "alerts": "tsx src/alerts.ts",
     "slack-alerts": "tsx src/slack-alerts.ts",
-    "test": "tsx --test tests/server.test.ts tests/calendar.test.ts tests/attachments.test.ts tests/alerts.test.ts tests/send-as.test.ts tests/slack-alerts.test.ts tests/muse-filer.test.ts tests/muse-watch.test.ts tests/muse-planner.test.ts",
+    "test": "tsx --test tests/server.test.ts tests/calendar.test.ts tests/attachments.test.ts tests/alerts.test.ts tests/send-as.test.ts tests/slack-alerts.test.ts tests/muse-filer.test.ts tests/muse-watch.test.ts tests/muse-planner.test.ts tests/mail-digest.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc",
     "muse-filer": "tsx src/alerts/muse-filer.ts",
     "muse-watch": "tsx src/alerts/muse-watch.ts",
-    "muse-planner": "tsx src/alerts/muse-planner.ts"
+    "muse-planner": "tsx src/alerts/muse-planner.ts",
+    "mail-digest": "tsx src/alerts/mail-digest.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
