@@ -4,6 +4,61 @@
 
 A Gmail [MCP server](https://modelcontextprotocol.io) for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that provides full email management across multiple Gmail accounts.
 
+## Mail digest CLI
+
+`npm run mail-digest` previews one plain text digest across configured accounts.
+It uses the existing `accounts.json`, `credentials.json`, and stored account
+tokens through `getAccounts()` and `getGmailClient()`; it never starts interactive
+authentication. Existing tokens need read access and `gmail.settings.basic` to
+read send-as identities, plus `gmail.send` when sending.
+
+Set configuration in your local shell environment (never commit real addresses):
+
+```bash
+export DIGEST_TO='digest@example.invalid'
+export DIGEST_FROM='source@example.invalid'
+export DIGEST_SKIP_ACCOUNTS='excluded@example.invalid'
+npm run mail-digest -- --dry-run
+```
+
+All three environment keys are required; `DIGEST_SKIP_ACCOUNTS=''` explicitly
+means no additional exclusions. The skip list accepts comma-separated configured
+emails or account aliases, and always includes `DIGEST_TO`. Use it to exclude
+personal accounts. `DIGEST_FROM` must exactly match a configured account email;
+both sender and recipient must be single bare addresses. No default addresses
+or account aliases are embedded in the CLI.
+
+The default is `--dry-run`: print the rendered email, send nothing, and leave
+digest state untouched. An explicit `--send` sends one email only to `DIGEST_TO`.
+No labels, drafts, archive, or read status are changed. An empty digest sends
+nothing and produces no preview email.
+
+The first scan covers the last 24 hours. Later scans start at the last successful
+send-mode scan, recorded in `~/.local/state/mail-digest/state.json`. Empty
+send-mode scans also advance that timestamp. Read or send failures preserve it.
+A local `run.lock` prevents concurrent sends; after a crashed process, confirm
+it has stopped before removing a stale lock. Sending is attempted once without
+retries. A crash or state-write failure after Gmail accepts an email can cause
+the next run to repeat that window; check the sending account before retrying.
+The existing auth loader may refresh and save its stored OAuth tokens during
+either mode.
+
+Threads are included only when the latest non-draft message is within the scan
+window and appears to be from a person. Owner addresses include every configured
+account and every send-as identity, including skipped accounts. A latest owner
+reply excludes the thread. Filters exclude automated sender patterns, GitHub,
+Slack, Vercel, Supabase, Stripe notifications/receipts, List-Unsubscribe/List-Id,
+bulk/auto-submitted mail, `[Muse]` subjects, and matches from the watcher's
+`~/.config/gmail-alerts/rules.json` using the same account/sender/subject matching.
+Missing rules mean no watcher exclusions; malformed rules abort the scan.
+Person detection uses sender/header heuristics and cannot prove an email is
+human; personal-mail classification is outside this CLI's scope.
+
+The email contains counts per account, grouped sender/subject/time/snippet/link
+entries, and Pacific/Honolulu times with am/pm. Subject periods use Honolulu time:
+AM before 11 am, Midday from 11 am to before 2 pm, and PM thereafter. Cron setup,
+replying, and personal-mail handling are outside this feature's scope.
+
 ## Features
 
 - **Gmail and Google Calendar** on one server and one token store per Google account
