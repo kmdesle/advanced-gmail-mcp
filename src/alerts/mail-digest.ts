@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { chmod, mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { gmail_v1 } from 'googleapis';
 import type { AccountConfig } from '../config.js';
@@ -34,10 +35,27 @@ export interface DigestConfig {
 
 export interface DigestThread {
   id: string;
+  messageId: string;
   from: string;
   subject: string;
   time: number;
   snippet: string;
+}
+
+export interface DigestSelectionThread {
+  account: string;
+  thread_id: string;
+  message_id: string;
+  subject: string;
+  from_name: string;
+  received_at: string;
+}
+
+export interface DigestSelection {
+  generated_at: string;
+  window_start: string;
+  window_end: string;
+  threads: DigestSelectionThread[];
 }
 
 export interface DigestGroup { account: AccountConfig; threads: DigestThread[] }
@@ -58,6 +76,47 @@ export function parseDigestConfig(env: NodeJS.ProcessEnv): DigestConfig {
   const skipAccounts = new Set(env.DIGEST_SKIP_ACCOUNTS.split(',').map(s => s.trim().toLowerCase()).filter(Boolean));
   skipAccounts.add(to);
   return { to, from, skipAccounts };
+}
+
+export function digestSelectionOutPath(env: NodeJS.ProcessEnv): string | undefined {
+  const value = env.DIGEST_SELECTION_OUT?.trim();
+  return value || undefined;
+}
+
+/** Display name only. A bare address, or any name that still contains one, becomes empty. */
+export function digestFromName(from: string): string {
+  const named = from.match(/^(.*?)<[^<>]*>\s*$/);
+  const name = (named ? named[1] : from).trim().replace(/^"(.*)"$/, '$1').trim();
+  if (!name || name.includes('@')) return '';
+  return name;
+}
+
+export function digestSelection(groups: DigestGroup[], since: number, now: number): DigestSelection {
+  return {
+    generated_at: new Date(now).toISOString(),
+    window_start: new Date(since).toISOString(),
+    window_end: new Date(now).toISOString(),
+    threads: groups.flatMap(group => group.threads.map(thread => ({
+      account: group.account.alias,
+      thread_id: thread.id,
+      message_id: thread.messageId,
+      subject: thread.subject,
+      from_name: digestFromName(thread.from),
+      received_at: new Date(thread.time).toISOString(),
+    }))),
+  };
+}
+
+export async function writeDigestSelection(targetPath: string, document: DigestSelection): Promise<void> {
+  const temp = join(dirname(targetPath), `.digest-selection-${process.pid}-${randomBytes(6).toString('hex')}.tmp`);
+  await writeFile(temp, JSON.stringify(document) + '\n', { mode: 0o640 });
+  await chmod(temp, 0o640);
+  try {
+    await rename(temp, targetPath);
+  } catch (error) {
+    await unlink(temp).catch(() => undefined);
+    throw error;
+  }
 }
 
 export function parseDigestArgs(args: string[]): { send: boolean } {
@@ -164,7 +223,8 @@ export function threadForDigest(
     || /\[Muse\]/i.test(subject) || rules.some(rule => matchesRule(rule, account, from, subject))
     || ignoredByLocalPatterns(from, subject, ignorePatterns)) return;
   if (!thread.id) throw new Error('Thread has no id');
-  return { id: thread.id, from: oneLine(from), subject: oneLine(subject) || '(no subject)', time,
+  if (!latest.id) throw new Error('Thread has no message id');
+  return { id: thread.id, messageId: latest.id, from: oneLine(from), subject: oneLine(subject) || '(no subject)', time,
     snippet: oneLine(decodeHtmlEntities(latest.snippet ?? '')).slice(0, 320) };
 }
 
@@ -275,6 +335,7 @@ export async function runDigest(options: {
   client: (account: AccountConfig) => Promise<ReadonlyDigestGmail>;
   sendClient: (account: AccountConfig) => Promise<DigestSendGmail>;
   send?: boolean; stateDirectory?: string; now?: number; output?: (text: string) => void;
+  selectionOut?: string; warn?: (message: string) => void;
 }): Promise<DigestEmail> {
   const { config, accounts } = options;
   // Exact configured address only; do not use the resolver's partial matching.
@@ -303,6 +364,14 @@ export async function runDigest(options: {
     const email = renderDigest(groups, now);
     if (options.send) {
       await sendDigest(config, config.to, email, () => options.sendClient(sender));
+      if (options.selectionOut) {
+        try {
+          await writeDigestSelection(options.selectionOut, digestSelection(groups, since, now));
+        } catch {
+          // The digest email already succeeded; a sidecar write must not fail the run.
+          (options.warn ?? console.warn)('Warning: DIGEST_SELECTION_OUT could not be written; digest send continued');
+        }
+      }
       // Advance only after a successful send (or a successfully scanned empty window).
       await writeFile(`${statePath}.new`, JSON.stringify({ lastDigest: now }) + '\n', { mode: 0o600 });
       await rename(`${statePath}.new`, statePath);
@@ -324,7 +393,10 @@ async function main() {
   const { getAccounts } = await import('../config.js');
   const { getGmailClient } = await import('../gmail/client.js');
   const rules = await loadDigestRules(join(homedir(), '.config/gmail-alerts/rules.json'));
-  await runDigest({ config, accounts: getAccounts(), rules, client: getGmailClient, sendClient: getGmailClient, ...mode });
+  await runDigest({
+    config, accounts: getAccounts(), rules, client: getGmailClient, sendClient: getGmailClient, ...mode,
+    selectionOut: digestSelectionOutPath(process.env),
+  });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
