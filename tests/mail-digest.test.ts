@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, test } from 'node:test';
 import type { gmail_v1 } from 'googleapis';
 import {
-  collectDigest, formatHonolulu, isPersonMessage, loadDigestIgnorePatterns, loadDigestRules, parseDigestArgs, parseDigestConfig,
-  renderDigest, runDigest, sendDigest, threadForDigest,
-  type DigestEmail, type DigestSendGmail, type ReadonlyDigestGmail,
+  collectDigest, digestFromName, digestSelectionOutPath, formatHonolulu, isPersonMessage, loadDigestIgnorePatterns, loadDigestRules,
+  parseDigestArgs, parseDigestConfig, renderDigest, runDigest, sendDigest, threadForDigest, writeDigestSelection,
+  type DigestEmail, type DigestSelection, type DigestSendGmail, type ReadonlyDigestGmail,
 } from '../src/alerts/mail-digest.js';
 
 const now = Date.parse('2026-11-11T22:00:00Z');
@@ -351,6 +351,113 @@ test('rejects concurrent sends, corrupt/future state, and an unconfigured sendin
   }
   await assert.rejects(runDigest({ ...options, config: { ...config(), from: 'other@example.invalid' } }), /configured account/);
   assert.equal(f.aliasReads(), 0);
+});
+
+test('send mode writes only selected threads to DIGEST_SELECTION_OUT by temp rename', async () => {
+  const root = await scratch();
+  const stateDirectory = join(root, 'state');
+  const selectionOut = join(root, 'selection.json');
+  await writeFile(selectionOut, 'previous\n', { mode: 0o640 });
+  const previous = await stat(selectionOut);
+  const ignored = message('alerts@example.invalid', now - 30_000);
+  ignored.id = 'message-ignored';
+  const kept = message('Contributor <sender@example.invalid>', now - 60_000);
+  kept.id = 'message-kept';
+  const f = fake([
+    thread([kept], 'thread-kept'),
+    thread([ignored], 'thread-ignored'),
+  ]);
+  const warnings: string[] = [];
+  const result = await runDigest({
+    config: config(), accounts: [source], rules: [], stateDirectory, now, send: true, selectionOut,
+    ignorePatterns: [{ kind: 'address', value: 'alerts@example.invalid' }],
+    client: async () => f.gmail, sendClient: async () => sender().gmail, warn: text => warnings.push(text),
+  });
+  assert.equal(result.count, 1);
+  assert.deepEqual(warnings, []);
+  const written = JSON.parse(await readFile(selectionOut, 'utf8')) as DigestSelection;
+  assert.deepEqual(Object.keys(written).sort(), ['generated_at', 'threads', 'window_end', 'window_start']);
+  assert.equal(written.generated_at, new Date(now).toISOString());
+  assert.equal(written.window_start, new Date(since).toISOString());
+  assert.equal(written.window_end, new Date(now).toISOString());
+  assert.equal(written.threads.length, 1);
+  assert.deepEqual(written.threads[0], {
+    account: source.alias,
+    thread_id: 'thread-kept',
+    message_id: 'message-kept',
+    subject: 'Proposal',
+    from_name: 'Contributor',
+    received_at: new Date(now - 60_000).toISOString(),
+  });
+  const serialized = JSON.stringify(written);
+  assert.doesNotMatch(serialized, /snippet|body|@|example\.invalid|Please review/i);
+  const replaced = await stat(selectionOut);
+  assert.notEqual(replaced.ino, previous.ino);
+  assert.equal(replaced.mode & 0o777, 0o640);
+  assert.deepEqual(await readdir(root), ['selection.json', 'state']);
+  assert.equal(digestFromName('sender@example.invalid'), '');
+  assert.equal(digestFromName('"Ada Lovelace" <sender@example.invalid>'), 'Ada Lovelace');
+});
+
+test('unset DIGEST_SELECTION_OUT writes nothing, and dry-run ignores a set path', async () => {
+  const root = await scratch();
+  const stateDirectory = join(root, 'state');
+  const selectionOut = join(root, 'selection.json');
+  const f = fake();
+  assert.equal(digestSelectionOutPath({}), undefined);
+  assert.equal(digestSelectionOutPath({ DIGEST_SELECTION_OUT: '  ' }), undefined);
+  await runDigest({
+    config: config(), accounts: [source], rules: [], stateDirectory, now, send: true,
+    selectionOut: digestSelectionOutPath({}),
+    client: async () => f.gmail, sendClient: async () => sender().gmail,
+  });
+  assert.deepEqual(await readdir(stateDirectory), ['state.json']);
+  await assert.rejects(stat(selectionOut), { code: 'ENOENT' });
+  const previewState = join(root, 'preview-state');
+  const output: string[] = [];
+  await runDigest({
+    config: config(), accounts: [source], rules: [], stateDirectory: previewState, now, selectionOut,
+    client: async () => f.gmail, sendClient: async () => { throw new Error('must not send'); },
+    output: text => output.push(text),
+  });
+  assert.equal(output.length, 1);
+  await assert.rejects(stat(selectionOut), { code: 'ENOENT' });
+  assert.deepEqual(await readdir(root), ['state']);
+});
+
+test('a selection write failure warns and still sends', async () => {
+  const root = await scratch();
+  const stateDirectory = join(root, 'state');
+  const sent = sender();
+  const warnings: string[] = [];
+  const result = await runDigest({
+    config: config(), accounts: [source], rules: [], stateDirectory, now, send: true,
+    selectionOut: join(root, 'missing-dir', 'selection.json'),
+    client: async () => fake().gmail, sendClient: async () => sent.gmail, warn: text => warnings.push(text),
+  });
+  assert.equal(result.count, 1);
+  assert.equal(sent.calls.length, 1);
+  assert.deepEqual(warnings, ['Warning: DIGEST_SELECTION_OUT could not be written; digest send continued']);
+  assert.deepEqual(JSON.parse(await readFile(join(stateDirectory, 'state.json'), 'utf8')), { lastDigest: now });
+});
+
+test('selection writer replaces the destination inode and leaves no temp file', async () => {
+  const root = await scratch();
+  const target = join(root, 'selection.json');
+  await writeFile(target, 'old\n');
+  const before = await stat(target);
+  const document: DigestSelection = {
+    generated_at: new Date(now).toISOString(),
+    window_start: new Date(since).toISOString(),
+    window_end: new Date(now).toISOString(),
+    threads: [],
+  };
+  await writeDigestSelection(target, document);
+  const after = await stat(target);
+  assert.notEqual(after.ino, before.ino);
+  assert.equal(after.mode & 0o777, 0o640);
+  assert.equal(await readFile(target, 'utf8'), JSON.stringify(document) + '\n');
+  assert.deepEqual(await readdir(root), ['selection.json']);
 });
 
 test('rules loader shares watcher validation, tolerates absent rules, and rejects malformed rules', async () => {

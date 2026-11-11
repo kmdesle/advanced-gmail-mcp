@@ -65,6 +65,15 @@ starting with `#` are ignored. A missing file adds no exclusions; matched sender
 addresses/domains and subject prefixes are case-insensitive. Subjects and snippets
 have common HTML entities decoded before they appear in the digest.
 
+Optional `DIGEST_SELECTION_OUT` is a file path. On each `--send` run, including
+an empty scan, the CLI writes the threads it selected as JSON and leaves the
+digest email unchanged. The file is replaced atomically (a temporary file in
+the same directory, mode 0640, then rename). Each thread record has the account
+alias, thread id, message id, subject, display name, and received time. It has
+no body, snippet, or email address. An unset or blank value writes nothing. A
+write failure logs a warning and does not fail the send. `--dry-run` never
+writes this file.
+
 ## Features
 
 - **Gmail and Google Calendar** on one server and one token store per Google account
