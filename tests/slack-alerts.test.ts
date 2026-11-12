@@ -15,7 +15,7 @@ afterEach(async () => {
 const T0 = Date.parse('2026-10-31T12:00:00Z');
 const ts = (offsetSeconds: number) => ((T0 + offsetSeconds * 1000) / 1000).toFixed(6);
 
-async function setup(overrides = { exclude: [] as string[], tags: {} as Record<string, string> }) {
+async function setup(overrides = { exclude: [] as string[], tags: {} as Record<string, string>, threads: [] as string[] }) {
   const dir = await mkdtemp(join(process.cwd(), '.slack-alerts-test-'));
   directories.push(dir);
   let clock = T0;
@@ -23,6 +23,8 @@ async function setup(overrides = { exclude: [] as string[], tags: {} as Record<s
     channels: [{ id: 'C1', name: 'fleet-red-action' }, { id: 'C2', name: 'general' }] as SlackChannel[],
     messages: {} as Record<string, SlackMessage[]>,
     historyCalls: [] as { channel: string; oldest: string }[],
+    replyCalls: [] as { channel: string; ts: string; cursor?: string }[],
+    replyPages: {} as Record<string, { items: SlackMessage[]; nextCursor?: string }[]>,
     discoveryCalls: 0,
     fail: undefined as undefined | ((channel: string) => SlackApiError | undefined),
   };
@@ -33,6 +35,11 @@ async function setup(overrides = { exclude: [] as string[], tags: {} as Record<s
       const error = state.fail?.(channel);
       if (error) throw error;
       return { items: (state.messages[channel] ?? []).filter(m => Number(m.ts) > Number(oldest)).reverse() };
+    },
+    async replies(channel, threadTs, cursor) {
+      state.replyCalls.push({ channel, ts: threadTs, cursor });
+      const pages = state.replyPages[threadTs] ?? [{ items: [] }];
+      return pages[cursor ? 1 : 0] ?? { items: [] };
     },
   };
   const logs: string[] = [];
@@ -209,7 +216,44 @@ test('parseColor and parseOverrides', () => {
   assert.equal(parseColor('🔴 x'), 'red');
   assert.equal(parseColor('🟡x'), 'amber');
   assert.equal(parseColor('x 🔴'), null);
-  assert.deepEqual(parseOverrides({}), { exclude: [], tags: {} });
+  assert.deepEqual(parseOverrides({}), { exclude: [], tags: {}, threads: [] });
+  assert.deepEqual(parseOverrides({ threads: { 'agent-hub': true, general: false } }), { exclude: [], tags: {}, threads: ['agent-hub'] });
   assert.throws(() => parseOverrides([]));
   assert.throws(() => parseOverrides({ tags: { a: 1 } }));
+});
+
+test('thread replies are appended once and persist across watcher restart', async () => {
+  const s = await setup({ exclude: [], tags: {}, threads: ['fleet-red-action'] });
+  await s.watcher.poll();
+  s.advance(1000);
+  const parent = { ts: ts(0.1), text: 'parent', reply_count: 1, latest_reply: ts(0.8) };
+  s.state.messages.C1 = [parent, { ts: ts(0.5), text: 'later channel message' }];
+  s.state.replyPages[parent.ts] = [{ items: [parent, { ts: ts(0.8), text: 'reply', user: 'U' }] }];
+  await s.watcher.poll();
+  assert.deepEqual((await s.lines()).map(x => [x.text, x.thread_ts]), [['parent', undefined], ['later channel message', undefined], ['reply', parent.ts]]);
+  const second = new SlackWatcher({
+    memberChannels: async () => ({ items: s.state.channels }),
+    history: async () => ({ items: [parent] }),
+    replies: async () => ({ items: [parent, { ts: ts(0.8), text: 'reply', user: 'U' }] }),
+  }, s.dir, { exclude: [], tags: {}, threads: ['fleet-red-action'] }, () => {}, () => new Date(T0 + 2000));
+  await second.poll();
+  assert.equal((await s.lines()).filter(x => x.text === 'reply').length, 1);
+});
+
+test('unflagged channels never call replies and flagged replies paginate', async () => {
+  const s = await setup({ exclude: [], tags: {}, threads: ['fleet-red-action'] });
+  await s.watcher.poll();
+  s.advance(1000);
+  const parent1 = { ts: ts(0.4), text: 'parent', reply_count: 2, latest_reply: ts(0.8) };
+  const parent2 = { ts: ts(0.45), text: 'parent', reply_count: 2, latest_reply: ts(0.8) };
+  s.state.messages.C1 = [parent1];
+  s.state.messages.C2 = [parent2];
+  s.state.replyPages[parent1.ts] = [
+    { items: [parent1, { ts: ts(0.5), text: 'first', user: 'U' }], nextCursor: 'next' },
+    { items: [{ ts: ts(0.8), text: 'second', user: 'U' }] },
+  ];
+  await s.watcher.poll();
+  assert.deepEqual(s.state.replyCalls.map(c => c.cursor), [undefined, 'next']);
+  assert.ok(s.state.replyCalls.every(c => c.channel === 'C1'));
+  assert.deepEqual((await s.lines()).filter(x => x.thread_ts).map(x => x.text), ['first', 'second']);
 });
