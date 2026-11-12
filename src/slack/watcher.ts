@@ -5,12 +5,13 @@ import { join } from 'node:path';
 export interface SlackChannel { id: string; name: string }
 export interface SlackMessage {
   ts: string; text?: string; user?: string; username?: string; subtype?: string;
-  bot_profile?: { name?: string }; thread_ts?: string;
+  bot_profile?: { name?: string }; thread_ts?: string; reply_count?: number; latest_reply?: string;
 }
 export interface SlackPage<T> { items: T[]; nextCursor?: string }
 export interface ReadonlySlack {
   memberChannels(cursor?: string): Promise<SlackPage<SlackChannel>>;
   history(channel: string, oldest: string, cursor?: string): Promise<SlackPage<SlackMessage>>;
+  replies(channel: string, ts: string, cursor?: string): Promise<SlackPage<SlackMessage>>;
 }
 
 export class SlackApiError extends Error {
@@ -19,7 +20,7 @@ export class SlackApiError extends Error {
   }
 }
 
-export interface Overrides { exclude: string[]; tags: Record<string, string> }
+export interface Overrides { exclude: string[]; tags: Record<string, string>; threads: string[] }
 export type Color = 'red' | 'amber' | 'green' | null;
 export interface SlackAlert {
   ts_iso: string; channel: string; tag: string; color: Color; ts: string; text: string;
@@ -31,16 +32,21 @@ const ERROR_THROTTLE_MS = 60 * 60_000;
 const API = 'https://slack.com/api';
 
 export function parseOverrides(value: unknown): Overrides {
-  const v = (value ?? {}) as { exclude?: unknown; tags?: unknown };
+  const v = (value ?? {}) as { exclude?: unknown; tags?: unknown; threads?: unknown };
   const exclude = v.exclude ?? [];
   const tags = v.tags ?? {};
+  const threads = v.threads ?? [];
   if (typeof value !== 'object' || value === null || Array.isArray(value)
     || !Array.isArray(exclude) || !exclude.every(n => typeof n === 'string')
     || typeof tags !== 'object' || tags === null || Array.isArray(tags)
-    || !Object.values(tags).every(t => typeof t === 'string' && t.trim())) {
-    throw new Error('channels.json must be {"exclude"?: string[], "tags"?: {name: tag}}');
+    || !Object.values(tags).every(t => typeof t === 'string' && t.trim())
+    || (!Array.isArray(threads) && (typeof threads !== 'object' || threads === null || Array.isArray(threads)))
+    || (Array.isArray(threads) && !threads.every(n => typeof n === 'string'))
+    || (!Array.isArray(threads) && !Object.values(threads).every(v => typeof v === 'boolean'))) {
+    throw new Error('channels.json must be {"exclude"?: string[], "tags"?: {name: tag}, "threads"?: string[] or {name: boolean}}');
   }
-  return { exclude: exclude as string[], tags: tags as Record<string, string> };
+  const threadChannels = Array.isArray(threads) ? threads : Object.keys(threads).filter(n => (threads as Record<string, boolean>)[n]);
+  return { exclude: exclude as string[], tags: tags as Record<string, string>, threads: threadChannels as string[] };
 }
 
 export function parseColor(text: string): Color {
@@ -85,6 +91,12 @@ export function createSlackClient(token: string, fetchImpl: typeof fetch = fetch
       });
       return { items: body.messages ?? [], nextCursor: body.response_metadata?.next_cursor || undefined };
     },
+    async replies(channel, ts, cursor) {
+      const body = await call('conversations.replies', {
+        channel, ts, limit: '200', ...(cursor ? { cursor } : {}),
+      });
+      return { items: body.messages ?? [], nextCursor: body.response_metadata?.next_cursor || undefined };
+    },
   };
 }
 
@@ -116,10 +128,11 @@ export class SlackWatcher {
   constructor(
     private client: ReadonlySlack,
     private stateDirectory: string,
-    private overrides: Overrides = { exclude: [], tags: {} },
+    private overrides: Overrides = { exclude: [], tags: {}, threads: [] },
     private log: (line: string) => void = console.log,
     private now: () => Date = () => new Date(),
     private sleep: (ms: number) => Promise<void> = ms => new Promise(r => setTimeout(r, ms)),
+    private threadLookbackDays = 7,
   ) {}
 
   private nowTs(): string {
@@ -155,6 +168,7 @@ export class SlackWatcher {
       const state = JSON.parse(await readFile(join(this.stateDirectory, 'state.json'), 'utf8'));
       if (!state || typeof state.channels !== 'object' || state.channels === null) throw new Error('Invalid state');
       this.cursors = state.channels;
+      this.threadCursors = state.threads ?? {};
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       this.cursors = {};
@@ -164,8 +178,19 @@ export class SlackWatcher {
 
   private async saveCursors() {
     const file = join(this.stateDirectory, 'state.json');
-    await writeFile(`${file}.new`, JSON.stringify({ channels: this.cursors }) + '\n', { mode: 0o600 });
+    await writeFile(`${file}.new`, JSON.stringify({ channels: this.cursors, threads: this.threadCursors }) + '\n', { mode: 0o600 });
     await rename(`${file}.new`, file);
+  }
+
+  private threadCursors: Record<string, string> = {};
+
+  private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try { return await fn(); } catch (error) {
+        if (!(error instanceof SlackApiError) || !error.retryAfterSeconds || attempt >= 5) throw error;
+        await this.sleep(error.retryAfterSeconds * 1000);
+      }
+    }
   }
 
   /** Append an ERROR line at most once per distinct (code, channel) per hour. */
@@ -205,7 +230,15 @@ export class SlackWatcher {
       await mkdir(this.stateDirectory, { recursive: true, mode: 0o700 });
       const cursors = await this.loadCursors();
       await this.refreshChannels();
+      const threadOldest = ((this.now().getTime() - this.threadLookbackDays * 86_400_000) / 1000).toFixed(6);
       let dirty = false;
+      for (const key of Object.keys(this.threadCursors)) {
+        const parentTs = key.slice(key.lastIndexOf(':') + 1);
+        if (compareTs(parentTs, threadOldest) < 0) {
+          delete this.threadCursors[key];
+          dirty = true;
+        }
+      }
       for (const channel of this.channels) {
         if (cursors[channel.id] === undefined) {
           // First sight of a channel (first run or newly joined): start at now, no flood.
@@ -214,15 +247,38 @@ export class SlackWatcher {
           continue;
         }
         try {
-          const messages = await this.paginate(c => this.client.history(channel.id, cursors[channel.id], c));
+          const threadsEnabled = (this.overrides.threads ?? []).includes(channel.name);
+          // Reuse the lookback history for the top-level scan, which still filters by its cursor.
+          const oldest = threadsEnabled ? threadOldest : cursors[channel.id];
+          const messages = await this.paginate(c => this.withRetry(() => this.client.history(channel.id, oldest, c)));
           messages.sort((a, b) => compareTs(a.ts, b.ts));
           const tag = this.tagFor(channel.name);
+          const threadParents = threadsEnabled ? messages : [];
           for (const message of messages) {
             if (compareTs(message.ts, cursors[channel.id]) <= 0) continue;
             await this.append('alerts.jsonl', toAlert(message, channel.name, tag, this.now()));
             cursors[channel.id] = message.ts;
             dirty = true;
             await this.saveCursors();
+          }
+          if (threadsEnabled) {
+            for (const parent of threadParents) {
+              if (!parent.reply_count || !parent.latest_reply) continue;
+              const key = `${channel.id}:${parent.ts}`;
+              const seen = this.threadCursors[key] ?? parent.ts;
+              if (compareTs(parent.latest_reply, seen) <= 0) continue;
+              const replies = await this.paginate(c => this.withRetry(() => this.client.replies(channel.id, parent.ts, c)));
+              replies.sort((a, b) => compareTs(a.ts, b.ts));
+              for (const reply of replies) {
+                if (reply.ts === parent.ts || compareTs(reply.ts, seen) <= 0) continue;
+                const alert = toAlert(reply, channel.name, tag, this.now());
+                alert.thread_ts = parent.ts;
+                await this.append('alerts.jsonl', alert);
+                if (compareTs(reply.ts, this.threadCursors[key] ?? parent.ts) > 0) this.threadCursors[key] = reply.ts;
+                dirty = true;
+                await this.saveCursors();
+              }
+            }
           }
         } catch (error) {
           if (!(error instanceof SlackApiError)) throw error;
@@ -246,17 +302,9 @@ export class SlackWatcher {
     const file = `backfill-${this.now().toISOString().slice(0, 10)}.jsonl`;
     await writeFile(join(this.stateDirectory, file), '', { mode: 0o600 });
     const oldest = ((this.now().getTime() - days * 86_400_000) / 1000).toFixed(6);
-    const withRetry = async <T>(fn: () => Promise<T>): Promise<T> => {
-      for (let attempt = 0; ; attempt++) {
-        try { return await fn(); } catch (error) {
-          if (!(error instanceof SlackApiError) || !error.retryAfterSeconds || attempt >= 5) throw error;
-          await this.sleep(error.retryAfterSeconds * 1000);
-        }
-      }
-    };
-    const channels = await withRetry(() => this.discover());
+    const channels = await this.withRetry(() => this.discover());
     for (const channel of channels) {
-      const messages = await this.paginate(c => withRetry(() => this.client.history(channel.id, oldest, c)));
+      const messages = await this.paginate(c => this.withRetry(() => this.client.history(channel.id, oldest, c)));
       messages.sort((a, b) => compareTs(a.ts, b.ts));
       const tag = this.tagFor(channel.name);
       for (const message of messages) await this.append(file, toAlert(message, channel.name, tag, this.now()));
