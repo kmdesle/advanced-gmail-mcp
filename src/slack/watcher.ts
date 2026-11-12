@@ -132,6 +132,7 @@ export class SlackWatcher {
     private log: (line: string) => void = console.log,
     private now: () => Date = () => new Date(),
     private sleep: (ms: number) => Promise<void> = ms => new Promise(r => setTimeout(r, ms)),
+    private threadLookbackDays = 7,
   ) {}
 
   private nowTs(): string {
@@ -229,7 +230,15 @@ export class SlackWatcher {
       await mkdir(this.stateDirectory, { recursive: true, mode: 0o700 });
       const cursors = await this.loadCursors();
       await this.refreshChannels();
+      const threadOldest = ((this.now().getTime() - this.threadLookbackDays * 86_400_000) / 1000).toFixed(6);
       let dirty = false;
+      for (const key of Object.keys(this.threadCursors)) {
+        const parentTs = key.slice(key.lastIndexOf(':') + 1);
+        if (compareTs(parentTs, threadOldest) < 0) {
+          delete this.threadCursors[key];
+          dirty = true;
+        }
+      }
       for (const channel of this.channels) {
         if (cursors[channel.id] === undefined) {
           // First sight of a channel (first run or newly joined): start at now, no flood.
@@ -238,12 +247,13 @@ export class SlackWatcher {
           continue;
         }
         try {
-          const messages = await this.paginate(c => this.withRetry(() => this.client.history(channel.id, cursors[channel.id], c)));
+          const threadsEnabled = (this.overrides.threads ?? []).includes(channel.name);
+          // Reuse the lookback history for the top-level scan, which still filters by its cursor.
+          const oldest = threadsEnabled ? threadOldest : cursors[channel.id];
+          const messages = await this.paginate(c => this.withRetry(() => this.client.history(channel.id, oldest, c)));
           messages.sort((a, b) => compareTs(a.ts, b.ts));
           const tag = this.tagFor(channel.name);
-          const threadParents = (this.overrides.threads ?? []).includes(channel.name)
-            ? await this.paginate(c => this.withRetry(() => this.client.history(channel.id, cursors[channel.id], c)))
-            : [];
+          const threadParents = threadsEnabled ? messages : [];
           for (const message of messages) {
             if (compareTs(message.ts, cursors[channel.id]) <= 0) continue;
             await this.append('alerts.jsonl', toAlert(message, channel.name, tag, this.now()));
@@ -251,7 +261,7 @@ export class SlackWatcher {
             dirty = true;
             await this.saveCursors();
           }
-          if ((this.overrides.threads ?? []).includes(channel.name)) {
+          if (threadsEnabled) {
             for (const parent of threadParents) {
               if (!parent.reply_count || !parent.latest_reply) continue;
               const key = `${channel.id}:${parent.ts}`;
